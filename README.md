@@ -192,13 +192,13 @@ Meer is niet nodig. Dit ontwerp werkt met elke router, van goedkope ISP routers 
 
 ---
 
-## 10. Wat de lezer handmatig moet doen
+## 10. Wat je handmatig moet doen
 
 Het playbook doet bijna alles automatisch, maar een paar dingen moet de lezer zelf doen.
 
 **MAC adres achterhalen**
 
-De lezer moet het MAC adres weten van de netwerkkaart die naar de PXE switch gaat. Dit doe je met:
+Je moet het MAC adres weten van de netwerkkaart die naar de PXE switch gaat. Dit doe je met:
 
     ip link show | grep -A1 enp | grep link/ether
 
@@ -224,7 +224,7 @@ De lezer vult hier het eigen MAC adres tussen de aanhalingstekens in.
 
 ---
 
-## 11. Troubleshooting voor de lezer
+## 11. Troubleshooting
 
 **Client krijgt geen IP**
 
@@ -268,12 +268,12 @@ Controleer of services enabled zijn: systemctl status dnsmasq netbootxyz
 
 ---
 
-## 12. Samenvatting voor de lezer
+## 12. Samenvatting
 
 Dit ontwerp lost het probleem op van een router die geen PXE ondersteunt.
 
 De oplossing is een apart PXE netwerk met eigen DHCP op de Tumbleweed server. De router blijft ongewijzigd. Alles werkt na een reboot. Geen speciale router configuratie nodig.
 
-De lezer hoeft alleen het MAC adres van de PXE netwerkkaart te achterhalen en in het playbook te zetten. De rest gebeurt automatisch.
+Je hoeft alleen het MAC adres van de PXE netwerkkaart te achterhalen en in het playbook te zetten. De rest gebeurt automatisch.
 
 Dit is een robuuste, productieklare oplossing voor homelab en SMB omgevingen.
