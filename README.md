@@ -11,8 +11,6 @@ Dit document beschrijft hoe je een netboot.xyz PXE server opzet op openSUSE Tumb
 
 ## 2. Uitgangssituatie
 
-De lezer heeft:
-
 - Een router die alleen standaard DHCP doet op 192.168.x.x
 - Een server met openSUSE Tumbleweed
 - Twee netwerkkaarten in de server
