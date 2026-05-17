@@ -11,7 +11,7 @@
 | **Interface** | ![Pinning](https://img.shields.io/badge/interface-udev%20pinning-important) ![Persistent](https://img.shields.io/badge/persistent-pxe0-green) |
 | **Boot Flow** | ![Entry Point](https://img.shields.io/badge/entry-ipxe.efi-blue) ![Chain](https://img.shields.io/badge/chain-HTTP-brightgreen) |
 | **Ports** | ![DHCP](https://img.shields.io/badge/67-UDP-blue) ![TFTP](https://img.shields.io/badge/69-UDP-purple) ![HTTP](https://img.shields.io/badge/80-TCP-orange) |
-| **Build** | ![Ansible](https://img.shields.io/badge/Ansible-7.0-ee0000?logo=ansible) ![OpenSUSE](https://img.shields.io/badge/openSUSE-Tumbleweed-green) |
+| **Build** | ![Ansible](https://img.shields.io/badge/Ansible-2.20.5-ee0000?logo=ansible) ![OpenSUSE](https://img.shields.io/badge/openSUSE-Tumbleweed-green) |
 
 ---
 
