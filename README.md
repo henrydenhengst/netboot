@@ -1,6 +1,18 @@
 # Netboot.xyz op openSUSE Tumbleweed
 ## Volledig technisch ontwerp
 
+| Category | Badge |
+|----------|-------|
+| **Playbook** | ![Version](https://img.shields.io/badge/version-7.0-blue) ![Status](https://img.shields.io/badge/status-production--ready-brightgreen) |
+| **Distributie** | ![openSUSE](https://img.shields.io/badge/openSUSE-Tumbleweed-178e3b?logo=opensuse) |
+| **Architectuur** | ![DHCP](https://img.shields.io/badge/DHCP-FULL%20mode-blue) ![TFTP](https://img.shields.io/badge/TFTP-enabled-purple) ![PXE](https://img.shields.io/badge/PXE-iPXE%2FEFI-orange) |
+| **Container** | ![Podman](https://img.shields.io/badge/container-Podman-8821e0?logo=podman) ![Netboot.xyz](https://img.shields.io/badge/netboot.xyz-latest-178e3b) |
+| **Networking** | ![Firewall](https://img.shields.io/badge/firewall-firewalld-0078d7) ![NAT](https://img.shields.io/badge/NAT-masquerade-green) |
+| **Interface** | ![Pinning](https://img.shields.io/badge/interface-udev%20pinning-important) ![Persistent](https://img.shields.io/badge/persistent-pxe0-green) |
+| **Boot Flow** | ![Entry Point](https://img.shields.io/badge/entry-ipxe.efi-blue) ![Chain](https://img.shields.io/badge/chain-HTTP-brightgreen) |
+| **Ports** | ![DHCP](https://img.shields.io/badge/67-UDP-blue) ![TFTP](https://img.shields.io/badge/69-UDP-purple) ![HTTP](https://img.shields.io/badge/80-TCP-orange) |
+| **Build** | ![Ansible](https://img.shields.io/badge/Ansible-7.0-ee0000?logo=ansible) ![OpenSUSE](https://img.shields.io/badge/openSUSE-Tumbleweed-green) |
+
 ---
 
 ## 1. Doel van dit ontwerp
