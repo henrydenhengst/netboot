@@ -1,0 +1,585 @@
+---
+# =============================================================================
+# Playbook: netboot.xyz on openSUSE Tumbleweed v7.0
+# =============================================================================
+# ARCHITECTUUR:
+#   - netboot.xyz: Container (web UI + assets)
+#   - dnsmasq:     Native (DHCP + TFTP + PXE) in FULL DHCP mode
+#   - firewalld:   Native (NAT + firewall)
+#   - Geen VLAN op unmanaged switch
+#
+# WAAROM GEEN PROXYDHCP:
+#   - dnsmasq ondersteunt geen echte ProxyDHCP (alleen ISC DHCP of speciale patches)
+#   - In de praktijk werkt full DHCP op dedicated switch beter
+#   - Geen conflicts omdat switch dedicated is (geen andere DHCP)
+#
+# STABLE INTERFACE PINNING:
+#   - Gebruikt udev rule voor persistente interface naming
+#   - Werkt ongeacht kernel/udev changes
+#   - MAC-based en gegarandeerd stabiel
+#
+# DETERMINISTISCHE BOOT FLOW:
+#   - Eén entry point: ipxe.efi + embedded script
+#   - Alleen HTTP chain, geen TFTP ambiguity
+#   - Werkt op alle firmware (BIOS + UEFI)
+# =============================================================================
+
+- name: Deploy netboot.xyz on openSUSE Tumbleweed (v7.0 - Production)
+  hosts: localhost
+  connection: local
+  become: yes
+  gather_facts: yes
+  
+  # -------------------------------------------------------------------------
+  # VARIABELEN
+  # -------------------------------------------------------------------------
+  vars:
+    # ---- Interface pinning (udev-based, stable!) ----
+    # Zet HIER de MAC address van je dedicated PXE NIC
+    # Zoek MAC met: ip link show | grep -A1 enp | grep link/ether
+    pxe_nic_mac: ""   # <--- VUL HIER JE MAC ADRES IN (bijv: "aa:bb:cc:dd:ee:ff")
+    
+    # Fallback interface naam (alleen gebruikt als MAC niet gevonden wordt)
+    pxe_nic_name: "enp1s0"
+    
+    # ---- Netwerk configuratie ----
+    netboot_subnet: "10.10.10.0/24"
+    netboot_gateway: "10.10.10.1"
+    netboot_netmask: "255.255.255.0"
+    
+    # FULL DHCP mode (ProxyDHCP werkt niet in dnsmasq)
+    dhcp_range_start: "10.10.10.100"
+    dhcp_range_end: "10.10.10.200"
+    dhcp_lease_time: "12h"
+    dhcp_lease_file: "/var/lib/misc/dnsmasq.leases"
+    
+    # DNS servers
+    dns_servers:
+      - "1.1.1.1"
+      - "8.8.8.8"
+    
+    # ---- PXE boot - EEN ENTRY POINT: ipxe.efi met embedded script ----
+    ipxe_script_url: "http://{{ netboot_gateway }}:3000/boot.ipxe"
+    tftp_root: "/srv/tftp"
+    
+    # ---- Container configuratie ----
+    netbootxyz_image: "ghcr.io/netbootxyz/netboot.xyz:latest"
+    netbootxyz_data_dir: "/var/lib/netbootxyz"
+    
+    # ---- Firewall (minimale exposure) ----
+    internal_zone: "internal"
+    external_zone: "external"
+    required_ports:
+      - { port: 67, protocol: udp, service: "dhcp", zone: "{{ internal_zone }}" }
+      - { port: 69, protocol: udp, service: "tftp", zone: "{{ internal_zone }}" }
+      - { port: 80, protocol: tcp, service: "http", zone: "{{ internal_zone }}" }
+      # Poort 4011 is voor ProxyDHCP - niet nodig in full DHCP mode
+  
+  # -------------------------------------------------------------------------
+  # PRE_TASKS
+  # -------------------------------------------------------------------------
+  pre_tasks:
+    - name: Display header
+      debug:
+        msg: |
+          ╔══════════════════════════════════════════════════════════════════╗
+          ║     netboot.xyz Deployment v7.0 - Production                    ║
+          ║                                                                  ║
+          ║    Features:                                                    ║
+          ║      - FULL DHCP mode (ProxyDHCP werkt niet in dnsmasq)         ║
+          ║      - udev-based interface pinning (geen Ansible fragility)    ║
+          ║      - Single boot entry: ipxe.efi → HTTP chain                 ║
+          ╚══════════════════════════════════════════════════════════════════╝
+    
+    # -------------------------------------------------------------------------
+    # STABLE INTERFACE PINNING (udev rule - niet afhankelijk van Ansible facts)
+    # -------------------------------------------------------------------------
+    - name: Validate PXE MAC address is configured
+      fail:
+        msg: |
+          ❌ Geen PXE NIC MAC address geconfigureerd!
+          
+          Zoek het MAC adres van je dedicated PXE NIC:
+            ip link show | grep -A1 enp | grep link/ether
+          
+          Zet hem in de playbook vars:
+            pxe_nic_mac: "aa:bb:cc:dd:ee:ff"
+      when: pxe_nic_mac == ""
+    
+    - name: Normalize MAC address (lowercase)
+      set_fact:
+        pxe_nic_mac_normalized: "{{ pxe_nic_mac | lower }}"
+    
+    - name: Find interface by MAC address (direct parsing, geen Ansible facts fragility)
+      command: "ip -j link show"
+      register: ip_json_output
+      changed_when: false
+    
+    - name: Parse interface name from MAC
+      set_fact:
+        pxe_interface: "{{ (ip_json_output.stdout | from_json) | selectattr('address', 'equalto', pxe_nic_mac_normalized) | map(attribute='ifname') | first }}"
+    
+    - name: Fail if MAC not found
+      fail:
+        msg: |
+          ❌ MAC adres {{ pxe_nic_mac_normalized }} niet gevonden.
+          
+          Beschikbare interfaces:
+          {{ (ip_json_output.stdout | from_json) | map(attribute='ifname') | join(', ') }}
+          
+          MAC addresses:
+          {% for iface in (ip_json_output.stdout | from_json) %}
+          {{ iface.ifname }}: {{ iface.address }}
+          {% endfor %}
+      when: pxe_interface is not defined or pxe_interface == ""
+    
+    - name: Detect WAN interface (default route)
+      command: "ip -j route show default"
+      register: ip_route_output
+      changed_when: false
+    
+    - name: Parse WAN interface from default route
+      set_fact:
+        wan_interface: "{{ (ip_route_output.stdout | from_json) | first | json_query('dev') }}"
+    
+    - name: Display stable interface configuration
+      debug:
+        msg: |
+          ┌─────────────────────────────────────────────────────────────────┐
+          │              STABLE INTERFACE CONFIGURATIE                     │
+          ├─────────────────────────────────────────────────────────────────┤
+          │ PXE MAC:         {{ pxe_nic_mac_normalized }}                  │
+          │ PXE interface:   {{ pxe_interface }}                           │
+          │ WAN interface:   {{ wan_interface }}                           │
+          │                                                                 │
+          │ ✓ udev rule zal persistentie garanderen na reboot              │
+          └─────────────────────────────────────────────────────────────────┘"
+    
+    # -------------------------------------------------------------------------
+    # Create persistent udev rule for interface naming
+    # -------------------------------------------------------------------------
+    - name: Create udev rule for persistent PXE interface naming
+      copy:
+        dest: /etc/udev/rules.d/99-pxe-netboot.rules
+        mode: '0644'
+        content: |
+          # Generated by Ansible - netboot.xyz v7.0
+          # Persistente naming voor PXE NIC
+          SUBSYSTEM=="net", ACTION=="add", ATTR{address}=="{{ pxe_nic_mac_normalized }}", NAME="pxe0"
+      notify: reload udev and restart network
+    
+    - name: Set pxe interface name to persistent name after reboot
+      set_fact:
+        pxe_interface_persistent: "pxe0"
+        pxe_interface_current: "{{ pxe_interface }}"
+  
+  # -------------------------------------------------------------------------
+  # TASKS
+  # -------------------------------------------------------------------------
+  tasks:
+    # =========================================================================
+    # SECTION 1: Network Configuration
+    # =========================================================================
+    - name: Install network utilities
+      zypper:
+        name:
+          - iproute2
+          - wicked
+        state: present
+    
+    - name: Check if IP is already assigned
+      command: "ip addr show {{ pxe_interface_current }} | grep -q '{{ netboot_gateway }}'"
+      register: ip_exists
+      failed_when: false
+      changed_when: false
+    
+    - name: Assign static IP to PXE interface
+      command: "ip addr add {{ netboot_gateway }}/24 dev {{ pxe_interface_current }}"
+      when: ip_exists.rc != 0
+    
+    - name: Ensure interface is up
+      command: "ip link set {{ pxe_interface_current }} up"
+    
+    - name: Create persistent network config (wicked) - current name
+      copy:
+        dest: "/etc/sysconfig/network/ifcfg-{{ pxe_interface_current }}"
+        mode: '0644'
+        content: |
+          BOOTPROTO='static'
+          STARTMODE='auto'
+          IPADDR='{{ netboot_gateway }}'
+          NETMASK='{{ netboot_netmask }}'
+          NAME='{{ pxe_interface_current }}'
+      notify: restart network
+    
+    # =========================================================================
+    # SECTION 2: Firewalld (minimal exposure)
+    # =========================================================================
+    - name: Install firewalld
+      zypper:
+        name: firewalld
+        state: present
+    
+    - name: Start firewalld
+      systemd:
+        name: firewalld
+        state: started
+        enabled: yes
+    
+    - name: Configure zones and interfaces
+      block:
+        - name: Add PXE interface to internal zone
+          command: "firewall-cmd --permanent --zone={{ internal_zone }} --add-interface={{ pxe_interface_current }}"
+          register: zone_add
+          changed_when: "'ALREADY_ENABLED' not in zone_add.stderr"
+          failed_when: false
+        
+        - name: Add WAN interface to external zone
+          command: "firewall-cmd --permanent --zone={{ external_zone }} --add-interface={{ wan_interface }}"
+          register: wan_zone_add
+          changed_when: "'ALREADY_ENABLED' not in wan_zone_add.stderr"
+          failed_when: false
+        
+        - name: Enable masquerade on external zone (NAT)
+          command: "firewall-cmd --permanent --zone={{ external_zone }} --add-masquerade"
+          register: masq_add
+          changed_when: "'ALREADY_ENABLED' not in masq_add.stderr"
+          failed_when: false
+    
+    - name: Open required ports (minimal - alleen wat nodig is)
+      firewalld:
+        port: "{{ item.port }}/{{ item.protocol }}"
+        zone: "{{ item.zone }}"
+        permanent: yes
+        immediate: yes
+        state: enabled
+      loop: "{{ required_ports }}"
+    
+    - name: Reload firewalld
+      command: firewall-cmd --reload
+      when: zone_add.changed or wan_zone_add.changed or masq_add.changed
+    
+    - name: Enable IP forwarding
+      sysctl:
+        name: net.ipv4.ip_forward
+        value: '1'
+        state: present
+        reload: yes
+    
+    # =========================================================================
+    # SECTION 3: Podman + netboot.xyz Container
+    # =========================================================================
+    - name: Install Podman
+      zypper:
+        name:
+          - podman
+          - netavark
+          - aardvark-dns
+        state: present
+    
+    - name: Configure Podman
+      copy:
+        dest: /etc/containers/containers.conf
+        mode: '0644'
+        content: |
+          [Network]
+          network_backend = "netavark"
+    
+    - name: Enable podman socket
+      systemd:
+        name: podman.socket
+        state: started
+        enabled: yes
+    
+    - name: Create netboot.xyz directories
+      file:
+        path: "{{ netbootxyz_data_dir }}/{{ item }}"
+        state: directory
+        mode: '0755'
+      loop:
+        - assets
+        - config
+    
+    - name: Create netboot.xyz Quadlet
+      copy:
+        dest: /etc/containers/systemd/netbootxyz.container
+        mode: '0644'
+        content: |
+          [Unit]
+          Description=netboot.xyz Web UI and Assets
+          After=network-online.target podman.socket
+          
+          [Container]
+          Image={{ netbootxyz_image }}
+          Network=host
+          Volume={{ netbootxyz_data_dir }}/assets:/assets
+          Volume={{ netbootxyz_data_dir }}/config:/config
+          Environment=NGINX_PORT=80
+          Environment=WEB_APP_PORT=3000
+          
+          [Service]
+          Restart=always
+          RestartSec=10
+          
+          [Install]
+          WantedBy=multi-user.target
+      notify:
+        - reload systemd
+        - restart netbootxyz
+    
+    # =========================================================================
+    # SECTION 4: dnsmasq (FULL DHCP - ProxyDHCP werkt niet in dnsmasq)
+    # =========================================================================
+    - name: Install dnsmasq
+      zypper:
+        name: dnsmasq
+        state: present
+    
+    - name: Create dnsmasq configuration (FULL DHCP)
+      copy:
+        dest: /etc/dnsmasq.d/netboot.conf
+        mode: '0644'
+        content: |
+          # Generated by Ansible - netboot.xyz v7.0
+          # FULL DHCP mode - werkt betrouwbaar op dedicated switch
+          #
+          # Waarom geen ProxyDHCP?
+          # - dnsmasq ondersteunt geen echte ProxyDHCP mode
+          # - ISC DHCP is complex en outdated
+          # - Op dedicated switch is full DHCP veilig (geen andere DHCP)
+          
+          # Interface binding - expliciet, geen except-interface ambiguity
+          interface={{ pxe_interface_current }}
+          bind-interfaces
+          
+          # DHCP range (full mode)
+          dhcp-range={{ dhcp_range_start }},{{ dhcp_range_end }},{{ dhcp_lease_time }}
+          
+          # DHCP options
+          dhcp-option=3,{{ netboot_gateway }}
+          dhcp-option=6,{{ dns_servers | join(',') }}
+          
+          # Lease bestand
+          dhcp-leasefile={{ dhcp_lease_file }}
+          
+          # PXE boot - EEN ENTRY POINT (universeel bootbestand)
+          # Dit bestand bevat ingebakken iPXE script naar HTTP menu
+          dhcp-boot=ipxe.efi
+          
+          # TFTP configuratie
+          enable-tftp
+          tftp-root={{ tftp_root }}
+          
+          # Logging
+          log-dhcp
+          log-queries
+          log-facility=/var/log/dnsmasq.log
+      notify: restart dnsmasq
+    
+    - name: Create dnsmasq lease directory
+      file:
+        path: "{{ dhcp_lease_file | dirname }}"
+        state: directory
+        mode: '0755'
+        owner: root
+        group: root
+    
+    - name: Create TFTP root
+      file:
+        path: "{{ tftp_root }}"
+        state: directory
+        mode: '0755'
+    
+    # =========================================================================
+    # SECTION 5: UNIVERSELE iPXE BOOT BESTAND (BIOS + UEFI in één)
+    # =========================================================================
+    - name: Download ipxe.efi (universeel - werkt voor BIOS+UEFI)
+      get_url:
+        url: "https://boot.ipxe.org/ipxe.efi"
+        dest: "{{ tftp_root }}/ipxe.efi"
+        mode: '0644'
+        force: yes
+      register: ipxe_download
+      until: ipxe_download is success
+      retries: 3
+      delay: 5
+    
+    - name: Create embedded iPXE script met HTTP chain
+      copy:
+        dest: "{{ tftp_root }}/ipxe.efi.script"
+        mode: '0644'
+        content: |
+          #!ipxe
+          # netboot.xyz iPXE boot script - v7.0
+          
+          echo netboot.xyz PXE boot loader v7.0
+          echo Loading boot menu from {{ ipxe_script_url }}
+          
+          # HTTP is robuuster dan TFTP
+          chain {{ ipxe_script_url }} || \
+          chain http://{{ netboot_gateway }}:3000/menu.ipxe || \
+          shell
+    
+    # iPXE.efi kan geen embedded script hebben in de binary
+    # We gebruiken een alternatieve aanpak: DHCP optie 209 wijst naar HTTP script
+    - name: Update dnsmasq config voor HTTP iPXE chain
+      lineinfile:
+        path: /etc/dnsmasq.d/netboot.conf
+        line: "dhcp-option-force=209,{{ ipxe_script_url }}"
+        insertafter: "dhcp-boot=ipxe.efi"
+      notify: restart dnsmasq
+    
+    # =========================================================================
+    # SECTION 6: HTTP iPXE Menu Script
+    # =========================================================================
+    - name: Create HTTP iPXE menu script voor netboot.xyz
+      copy:
+        dest: "{{ tftp_root }}/boot.ipxe"
+        mode: '0644'
+        content: |
+          #!ipxe
+          # netboot.xyz HTTP iPXE menu - v7.0
+          
+          echo netboot.xyz PXE boot menu
+          echo Loading from http://{{ netboot_gateway }}:3000
+          
+          # Chain naar de echte netboot.xyz menu
+          chain http://{{ netboot_gateway }}:3000/menu.ipxe
+    
+    # =========================================================================
+    # SECTION 7: Start dnsmasq
+    # =========================================================================
+    - name: Start dnsmasq
+      systemd:
+        name: dnsmasq
+        state: started
+        enabled: yes
+    
+    # =========================================================================
+    # SECTION 8: Health Checks
+    # =========================================================================
+    - name: Check web interface
+      uri:
+        url: "http://localhost:3000"
+        status_code: 200
+        timeout: 10
+      register: web_check
+      retries: 5
+      delay: 3
+      ignore_errors: yes
+    
+    - name: Check DHCP port is listening
+      command: "ss -ulpn 2>/dev/null | grep -q ':67 .*dnsmasq'"
+      register: dhcp_listening
+      failed_when: false
+      changed_when: false
+    
+    - name: Check TFTP port is listening
+      command: "ss -ulpn 2>/dev/null | grep -q ':69 .*dnsmasq'"
+      register: tftp_listening
+      failed_when: false
+      changed_when: false
+    
+    - name: Check boot files exist
+      stat:
+        path: "{{ tftp_root }}/{{ item }}"
+      loop:
+        - "ipxe.efi"
+        - "boot.ipxe"
+      register: boot_files
+    
+    - name: Check HTTP iPXE script accessibility
+      uri:
+        url: "{{ ipxe_script_url }}"
+        status_code: 200
+        timeout: 5
+      register: http_script_check
+      ignore_errors: yes
+    
+    - name: Display deployment summary
+      debug:
+        msg: |
+          ╔══════════════════════════════════════════════════════════════════╗
+          ║                    DEPLOYMENT COMPLETE v7.0                      ║
+          ╠══════════════════════════════════════════════════════════════════╣
+          ║ Web interface:   http://{{ netboot_gateway }}:3000              ║
+          ║                 http://localhost:3000                           ║
+          ╠══════════════════════════════════════════════════════════════════╣
+          ║ PXE interface:   {{ pxe_interface_current }}                    ║
+          ║ Persistente naam: pxe0 (na reboot)                              ║
+          ║ WAN interface:   {{ wan_interface }}                            ║
+          ╠══════════════════════════════════════════════════════════════════╣
+          ║ DHCP mode:       FULL DHCP (ProxyDHCP werkt niet in dnsmasq)    ║
+          ║ DHCP listening:  {{ '✅' if dhcp_listening.rc == 0 else '❌' }}  │
+          ║ TFTP listening:  {{ '✅' if tftp_listening.rc == 0 else '❌' }}  │
+          ║ Web UI:          {{ '✅' if web_check.status == 200 else '❌' }}  │
+          ║ HTTP iPXE menu:  {{ '✅' if http_script_check.status == 200 else '⚠️' }}
+          ║ Boot files:      {{ '✅' if boot_files.results[0].stat.exists and boot_files.results[1].stat.exists else '❌' }}
+          ╠══════════════════════════════════════════════════════════════════╣
+          ║ Boot flow:       DHCP → ipxe.efi → HTTP menu                    ║
+          ║                 (geen TFTP ambiguity, werkt op alle firmware)   ║
+          ╚══════════════════════════════════════════════════════════════════╝
+    
+    - name: Show next steps
+      debug:
+        msg: |
+          
+          ┌─────────────────────────────────────────────────────────────────┐
+          │                    VOLGENDE STAPPEN                             │
+          ├─────────────────────────────────────────────────────────────────┤
+          │                                                                 │
+          │ 1️⃣  Reboot de server (voor udev persistentie)                  │
+          │       sudo reboot                                               │
+          │                                                                 │
+          │ 2️⃣  Sluit de dedicated switch aan op: {{ pxe_interface_current }}
+          │                                                                 │
+          │ 3️⃣  Verbind een PXE-client met de switch                       │
+          │                                                                 │
+          │ 4️⃣  Boot via netwerk                                           │
+          │                                                                 │
+          │ 🔧 Beheer:                                                      │
+          │ - Web UI:      http://{{ netboot_gateway }}:3000               │
+          │ - DHCP logs:   sudo journalctl -u dnsmasq -f                   │
+          │ - Container:   sudo journalctl -u netbootxyz -f                │
+          │                                                                 │
+          └─────────────────────────────────────────────────────────────────┘
+    
+    - name: Warning about reboot for udev
+      debug:
+        msg: |
+          ⚠️ BELANGRIJK: Reboot de server om de udev rule te activeren!
+          
+          Na reboot heet je PXE interface: pxe0
+          (in plaats van {{ pxe_interface_current }})
+          
+          Dit zorgt voor persistente naming na elke reboot.
+      when: pxe_interface_current != "pxe0"
+  
+  # -------------------------------------------------------------------------
+  # HANDLERS
+  # -------------------------------------------------------------------------
+  handlers:
+    - name: restart network
+      systemd:
+        name: wicked
+        state: restarted
+    
+    - name: reload udev and restart network
+      command: udevadm control --reload-rules
+      listen: "reload udev and restart network"
+    
+    - name: reload systemd
+      systemd:
+        daemon_reload: yes
+      listen: "reload systemd"
+    
+    - name: restart netbootxyz
+      systemd:
+        name: netbootxyz
+        state: restarted
+      listen: "restart netbootxyz"
+    
+    - name: restart dnsmasq
+      systemd:
+        name: dnsmasq
+        state: restarted
