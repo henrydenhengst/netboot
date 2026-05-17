@@ -159,7 +159,7 @@ Alles moet werken na een reboot van de server.
 
 **Netwerk configuratie**
 
-De static IP configuratie van de PXE interface wordt opgeslagen in /etc/sysconfig/network/ifcfg-pxe0. De interface krijgt een vaste naam (pxe0) via een udev regel die kijkt naar het MAC adres. Na elke reboot heet de interface hetzelfde en heeft hij het juiste IP adres.
+De static IP configuratie van de PXE interface wordt opgeslagen in `/etc/sysconfig/network/ifcfg-pxe0`. De interface krijgt een vaste naam (pxe0) via een udev regel die kijkt naar het MAC adres. Na elke reboot heet de interface hetzelfde en heeft hij het juiste IP adres.
 
 **Services**
 
@@ -171,11 +171,11 @@ firewalld is geconfigureerd met permanente regels voor zones en masquerade. Na e
 
 **DHCP leases**
 
-dnsmasq bewaart DHCP leases in /var/lib/misc/dnsmasq.leases. Als de server herstart, onthoudt hij welke IP adressen al waren uitgedeeld.
+dnsmasq bewaart DHCP leases in `/var/lib/misc/dnsmasq.leases`. Als de server herstart, onthoudt hij welke IP adressen al waren uitgedeeld.
 
 **Boot bestanden**
 
-De iPXE boot bestanden staan in /srv/tftp en blijven gewoon bestaan na een reboot.
+De iPXE boot bestanden staan in `/srv/tftp| en blijven gewoon bestaan na een reboot.
 
 ---
 
@@ -200,7 +200,7 @@ Het playbook doet bijna alles automatisch, maar een paar dingen moet de lezer ze
 
 Je moet het MAC adres weten van de netwerkkaart die naar de PXE switch gaat. Dit doe je met:
 
-    ip link show | grep -A1 enp | grep link/ether
+    `ip link show | grep -A1 enp | grep link/ether`
 
 Het MAC adres ziet eruit als aa:bb:cc:dd:ee:ff.
 
@@ -220,7 +220,7 @@ De lezer vult hier het eigen MAC adres tussen de aanhalingstekens in.
 
 **Playbook draaien**
 
-    ansible-playbook netboot.yml --ask-become-pass
+    `ansible-playbook netboot.yml --ask-become-pass`
 
 ---
 
@@ -228,35 +228,35 @@ De lezer vult hier het eigen MAC adres tussen de aanhalingstekens in.
 
 **Client krijgt geen IP**
 
-Controleer of dnsmasq draait: systemctl status dnsmasq
+Controleer of dnsmasq draait: `systemctl status dnsmasq`
 
-Controleer of de server luistert op poort 67: ss -ulpn | grep :67
+Controleer of de server luistert op poort 67: `ss -ulpn | grep :67`
 
 Controleer of de switch goed is aangesloten op de juiste netwerkkaart.
 
 **Client laadt geen bootloader**
 
-Test TFTP: tftp 10.10.10.1 -c get ipxe.efi
+Test TFTP: `tftp 10.10.10.1 -c get ipxe.efi|
 
-Controleer of het bestand bestaat: ls -la /srv/tftp/ipxe.efi
+Controleer of het bestand bestaat: `ls -la /srv/tftp/ipxe.efi`
 
-Controleer poort 69: ss -ulpn | grep :69
+Controleer poort 69: `ss -ulpn | grep :69`
 
 **Menu verschijnt niet**
 
-Controleer of de container draait: podman ps
+Controleer of de container draait: `podman ps`
 
-Test de web interface: curl http://localhost:3000
+Test de web interface: `curl http://localhost:3000`
 
-Controleer of het HTTP script werkt: curl http://10.10.10.1:3000/boot.ipxe
+Controleer of het HTTP script werkt: `curl http://10.10.10.1:3000/boot.ipxe`
 
 **Client heeft geen internet**
 
 Controleer IP forwarding: sysctl net.ipv4.ip_forward
 
-Controleer NAT regels: iptables -t nat -L -n -v
+Controleer NAT regels: `iptables -t nat -L -n -v`
 
-Controleer of de server zelf internet heeft: ping 1.1.1.1
+Controleer of de server zelf internet heeft: `ping 1.1.1.1`
 
 **Alles werkt maar na reboot niet**
 
