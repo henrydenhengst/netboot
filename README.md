@@ -113,7 +113,7 @@ Het iPXE bootloader start op. iPXE kan meer protocollen dan traditionele PXE, wa
 
 **Stap 6: Menu laden**
 
-iPXE volgt de instructies in de DHCP response (optie 209) en laadt het menu via HTTP van de server: http://10.10.10.1:3000/boot.ipxe
+iPXE volgt de instructies in de DHCP response (optie 209) en laadt het menu via HTTP van de server: `http://10.10.10.1:3000/boot.ipxe`
 
 **Stap 7: Gebruiker kiest**
 
