@@ -1,0 +1,461 @@
+---
+# =============================================================================
+# Playbook: lch-postinstall.yml
+# Doel: Post-installatie configuratie voor openSUSE Tumbleweed
+# Gebruik:
+#   ansible-playbook -i inventory.ini lch-postinstall.yml --tags "ssh,firewall"
+# =============================================================================
+
+- name: LCH Init - Post-installatie configuratie
+  hosts: localhost
+  become: true
+  gather_facts: true
+
+  vars:
+    admin_user: "lch"
+    hostname_prefix: "lch"
+    domain: "lch.lan"
+    
+    # SSH hardening opties
+    ssh_permit_root_login: "no"
+    ssh_password_auth: "no"
+    ssh_max_auth_tries: "3"
+    ssh_x11_forwarding: "no"
+
+  tasks:
+
+    # =========================================================================
+    # 1. ROBUUSTE HOSTNAME
+    # =========================================================================
+    - name: Lees product serial
+      slurp:
+        src: /sys/class/dmi/id/product_serial
+      register: product_serial_raw
+      failed_when: false
+      tags: [hostname]
+
+    - name: Decode product serial
+      set_fact:
+        product_serial: "{{ (product_serial_raw.content | b64decode | trim) if product_serial_raw.content is defined else '' }}"
+      tags: [hostname]
+
+    - name: Lees product UUID (fallback)
+      slurp:
+        src: /sys/class/dmi/id/product_uuid
+      register: product_uuid_raw
+      failed_when: false
+      when: product_serial == "" or product_serial == "To Be Filled By O.E.M."
+      tags: [hostname]
+
+    - name: Decode product UUID
+      set_fact:
+        product_uuid: "{{ (product_uuid_raw.content | b64decode | trim) if product_uuid_raw.content is defined else '' }}"
+      when: product_serial == "" or product_serial == "To Be Filled By O.E.M."
+      tags: [hostname]
+
+    - name: Lees machine-id (laatste fallback)
+      slurp:
+        src: /etc/machine-id
+      register: machine_id_raw
+      when: 
+        - product_serial == "" or product_serial == "To Be Filled By O.E.M."
+        - product_uuid == ""
+      tags: [hostname]
+
+    - name: Decode machine-id
+      set_fact:
+        machine_id: "{{ (machine_id_raw.content | b64decode | trim)[:8] if machine_id_raw.content is defined else '00000000' }}"
+      when: 
+        - product_serial == "" or product_serial == "To Be Filled By O.E.M."
+        - product_uuid == ""
+      tags: [hostname]
+
+    - name: Bepaal unieke identifier
+      set_fact:
+        unique_id: >-
+          {{
+            product_serial 
+            if (product_serial != "" and product_serial != "To Be Filled By O.E.M.")
+            else
+            product_uuid
+            if (product_uuid != "")
+            else
+            machine_id
+          }}
+      tags: [hostname]
+
+    - name: Sanitize unique identifier
+      set_fact:
+        unique_id: "{{ unique_id | regex_replace('\\s+', '-') | regex_replace('[^a-zA-Z0-9-]', '') }}"
+      tags: [hostname]
+
+    - name: Stel hostname in
+      hostname:
+        name: "{{ hostname_prefix }}-{{ unique_id }}"
+      tags: [hostname]
+
+    - name: Refresh hostname facts
+      setup:
+        filter:
+          - ansible_hostname
+          - ansible_fqdn
+      tags: [hostname]
+
+    - name: Update /etc/hosts
+      lineinfile:
+        path: /etc/hosts
+        regexp: '^127\.0\.1\.1'
+        line: "127.0.1.1 {{ hostname_prefix }}-{{ unique_id }}.{{ domain }} {{ hostname_prefix }}-{{ unique_id }}"
+        create: true
+        backup: true
+      tags: [hostname]
+
+    # =========================================================================
+    # 2. SUDO CONFIGURATIE
+    # =========================================================================
+    - name: Configureer sudo rechten voor admin user
+      copy:
+        dest: "/etc/sudoers.d/{{ admin_user }}"
+        content: |
+          # Sudo rechten voor {{ admin_user }} (gegenereerd door Ansible)
+          {{ admin_user }} ALL=(ALL) ALL
+        owner: root
+        group: root
+        mode: '0440'
+        validate: 'visudo -cf %s'
+      tags: [sudo]
+
+    # =========================================================================
+    # 3. SSH HARDENING (met validatie)
+    # =========================================================================
+    - name: Configureer SSH hardening opties
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: "{{ item.regexp }}"
+        line: "{{ item.line }}"
+        validate: '/usr/sbin/sshd -t -f %s'
+      loop:
+        - { regexp: '^#?PermitRootLogin', line: "PermitRootLogin {{ ssh_permit_root_login }}" }
+        - { regexp: '^#?PasswordAuthentication', line: "PasswordAuthentication {{ ssh_password_auth }}" }
+        - { regexp: '^#?PermitEmptyPasswords', line: 'PermitEmptyPasswords no' }
+        - { regexp: '^#?MaxAuthTries', line: "MaxAuthTries {{ ssh_max_auth_tries }}" }
+        - { regexp: '^#?X11Forwarding', line: "X11Forwarding {{ ssh_x11_forwarding }}" }
+        - { regexp: '^#?ClientAliveInterval', line: 'ClientAliveInterval 300' }
+        - { regexp: '^#?ClientAliveCountMax', line: 'ClientAliveCountMax 2' }
+        - { regexp: '^#?AllowUsers', line: "AllowUsers {{ admin_user }}" }
+      notify: restart sshd
+      tags: [ssh]
+
+    - name: Enable SSH service
+      systemd:
+        name: sshd
+        enabled: true
+        state: started
+      tags: [ssh]
+
+    # =========================================================================
+    # 4. FIREWALLD (met race condition fix)
+    # =========================================================================
+    - name: Installeer firewalld dependencies
+      package:
+        name:
+          - firewalld
+          - python3-firewall
+        state: present
+      tags: [firewall]
+
+    - name: Enable firewalld
+      systemd:
+        name: firewalld
+        enabled: true
+        state: started
+      tags: [firewall]
+
+    - name: Wacht op firewalld DBus
+      wait_for:
+        timeout: 5
+      tags: [firewall]
+
+    - name: Configureer firewall zones en services
+      firewalld:
+        service: "{{ item }}"
+        permanent: true
+        immediate: true
+        state: enabled
+      loop:
+        - ssh
+      tags: [firewall]
+
+    # =========================================================================
+    # 5. SSD / FILESYSTEM OPTIMALISATIE
+    # =========================================================================
+    - name: Detecteer SSD disks
+      shell: lsblk -dno rota | grep -q '^0$'
+      register: ssd_detect
+      failed_when: false
+      changed_when: false
+      tags: [storage]
+
+    - name: Enable fstrim timer
+      systemd:
+        name: fstrim.timer
+        enabled: true
+        state: started
+      when: ssd_detect.rc == 0
+      tags: [storage]
+
+    # =========================================================================
+    # 6. TUMBLEWEED UPDATES (met block/rescue)
+    # =========================================================================
+    - block:
+        - name: Refresh zypper repositories
+          command: zypper --non-interactive --gpg-auto-import-keys refresh
+          register: zypper_refresh
+          changed_when: false
+          retries: 3
+          delay: 10
+          until: zypper_refresh.rc == 0
+          environment:
+            ZYPP_LOCK_TIMEOUT: "120"
+
+        - name: Voer distribution upgrade uit
+          command: zypper --non-interactive dup --allow-vendor-change
+          register: zypper_dup
+          retries: 2
+          delay: 15
+          until: zypper_dup.rc == 0
+          environment:
+            ZYPP_LOCK_TIMEOUT: "120"
+
+      rescue:
+        - name: Toon zypper failure
+          debug:
+            msg: |
+              ⚠️ Zypper update mislukt!
+              RC: {{ zypper_dup.rc | default('onbekend') }}
+              Output: {{ zypper_dup.stderr | default('geen') }}
+
+      always:
+        - name: Cleanup zypp locks
+          file:
+            path: /var/run/zypp.pid
+            state: absent
+          ignore_errors: true
+
+      tags: [updates]
+
+    # =========================================================================
+    # 7. CHRONY (tijdsynchronisatie)
+    # =========================================================================
+    - name: Installeer chrony
+      package:
+        name: chrony
+        state: present
+      tags: [time]
+
+    - name: Configureer chrony pool
+      replace:
+        path: /etc/chrony.conf
+        regexp: '^pool\s+.*$'
+        replace: 'pool nl.pool.ntp.org iburst'
+      notify: restart chronyd
+      tags: [time]
+
+    - name: Enable chronyd
+      systemd:
+        name: chronyd
+        enabled: true
+        state: started
+      tags: [time]
+
+    # =========================================================================
+    # 8. NETWORKMANAGER
+    # =========================================================================
+    - name: Enable NetworkManager
+      systemd:
+        name: NetworkManager
+        enabled: true
+        state: started
+      tags: [network]
+
+    - name: Verzamel service facts
+      service_facts:
+      tags: [network]
+
+    - name: Disable wicked indien actief
+      systemd:
+        name: wicked
+        enabled: false
+        state: stopped
+      when:
+        - "'wicked.service' in ansible_facts.services"
+        - ansible_facts.services['wicked.service'].state == 'running'
+      ignore_errors: true
+      tags: [network]
+
+    # =========================================================================
+    # 9. JOURNALD PERSISTENT LOGGING
+    # =========================================================================
+    - name: Enable persistent journald logging
+      file:
+        path: /var/log/journal
+        state: directory
+        owner: root
+        group: systemd-journal
+        mode: '2755'
+      tags: [logging]
+
+    - name: Journald log size limit
+      lineinfile:
+        path: /etc/systemd/journald.conf
+        regexp: '^#?SystemMaxUse='
+        line: 'SystemMaxUse=1G'
+      notify: reload journald
+      tags: [logging]
+
+    # =========================================================================
+    # 10. LIGHTDM + LXQT CONFIGURATIE
+    # =========================================================================
+    - name: Verzamel package facts
+      package_facts:
+        manager: auto
+      tags: [desktop]
+
+    - name: Configureer LightDM als display manager
+      lineinfile:
+        path: /etc/sysconfig/displaymanager
+        regexp: '^DISPLAYMANAGER='
+        line: 'DISPLAYMANAGER="lightdm"'
+      when: "'lightdm' in ansible_facts.packages"
+      tags: [desktop]
+
+    - name: Check LightDM background
+      stat:
+        path: /usr/share/backgrounds/gnome/adwaita-day.jpg
+      register: lightdm_bg
+      tags: [desktop]
+
+    - name: Configureer LightDM GTK greeter
+      copy:
+        dest: /etc/lightdm/lightdm-gtk-greeter.conf
+        content: |
+          [greeter]
+          theme-name=Adwaita
+          icon-theme-name=Adwaita
+          {% if lightdm_bg.stat.exists %}
+          background=/usr/share/backgrounds/gnome/adwaita-day.jpg
+          {% endif %}
+          user-icon=true
+      when: "'lightdm-gtk-greeter' in ansible_facts.packages"
+      tags: [desktop]
+
+    - name: Enable LightDM
+      systemd:
+        name: lightdm
+        enabled: true
+      when: "'lightdm' in ansible_facts.packages"
+      tags: [desktop]
+
+    # =========================================================================
+    # 11. FAIL2BAN (optioneel)
+    # =========================================================================
+    - name: Install fail2ban
+      package:
+        name: fail2ban
+        state: present
+      tags: [security, fail2ban]
+
+    - name: Configureer fail2ban voor SSH
+      copy:
+        dest: /etc/fail2ban/jail.local
+        content: |
+          [DEFAULT]
+          bantime = 3600
+          findtime = 600
+          maxretry = 5
+          
+          [sshd]
+          enabled = true
+          port = ssh
+          filter = sshd
+          logpath = /var/log/auth.log
+          maxretry = 3
+      when: "'fail2ban' in ansible_facts.packages"
+      notify: restart fail2ban
+      tags: [security, fail2ban]
+
+    - name: Enable fail2ban
+      systemd:
+        name: fail2ban
+        enabled: true
+        state: started
+      when: "'fail2ban' in ansible_facts.packages"
+      tags: [security, fail2ban]
+
+    # =========================================================================
+    # 12. REBOOT HANDLING (gefixte versie)
+    # =========================================================================
+    - name: Check of reboot indicator bestaat
+      stat:
+        path: /var/run/reboot-needed
+      register: reboot_required
+      changed_when: false
+      tags: [reboot]
+
+    - name: Reboot indien nodig
+      reboot:
+        msg: "Reboot aangevraagd door Ansible (kernel/system update)"
+        reboot_timeout: 300
+      when: reboot_required.stat.exists
+      tags: [reboot]
+
+    # =========================================================================
+    # 13. SAMENVATTING
+    # =========================================================================
+    - name: Toon configuratie samenvatting
+      debug:
+        msg: |
+          ╔══════════════════════════════════════════════════════════════════╗
+          ║              LCH INIT - POST-INSTALLATIE VOLTOOID               ║
+          ╠══════════════════════════════════════════════════════════════════╣
+          ║ Hostname:      {{ ansible_hostname }}
+          ║ FQDN:          {{ ansible_fqdn }}
+          ║ Admin user:    {{ admin_user }} (sudo)
+          ║                                                                  ║
+          ║ 🔒 SSH Hardening:                                              ║
+          ║    • Root login:     {{ ssh_permit_root_login }}                ║
+          ║    • Password auth:   {{ ssh_password_auth }}                   ║
+          ║    • Max auth tries:  {{ ssh_max_auth_tries }}                  ║
+          ║    • AllowUsers:      {{ admin_user }}                          ║
+          ║                                                                  ║
+          ║ 🔥 Firewall:         SSH staat open                             ║
+          ║ 💾 SSD Trim:         {{ 'actief' if ssd_detect.rc == 0 else 'n.v.t.' }}
+          ║ 🕐 Chrony:           actief (nl.pool.ntp.org)                   ║
+          ║ 📋 Journald:         persistent (max 1GB)                       ║
+          ║ 🖥️  Desktop:         LXQT + LightDM                             ║
+          ║ 🔄 Reboot nodig:     {{ 'JA ⚠️' if reboot_required.stat.exists else 'NEE ✅' }}
+          ╚══════════════════════════════════════════════════════════════════╝
+      tags: [summary]
+
+  handlers:
+
+    - name: restart sshd
+      systemd:
+        name: sshd
+        state: restarted
+
+    - name: restart chronyd
+      systemd:
+        name: chronyd
+        state: restarted
+
+    - name: reload journald
+      systemd:
+        name: systemd-journald
+        state: restarted
+        daemon_reload: true
+
+    - name: restart fail2ban
+      systemd:
+        name: fail2ban
+        state: restarted
