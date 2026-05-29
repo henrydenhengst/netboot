@@ -1,5 +1,58 @@
 ---
+#
 # =============================================================================
+# INSTRUCTIE: AutoYAST installatie - gebruikers aanmaken
+# =============================================================================
+#
+# ROOT GEBRUIKER:
+#   # Root is de systeembeheerder voor noodgevallen
+#   # Geef een STERK wachtwoord (niet deelnemen aan dagelijks gebruik)
+#   # Voorbeeld: 12+ karakters, mix van letters/cijfers/symbolen
+#   # Bewaar dit wachtwoord veilig (bijv. password manager)
+#
+# GEBRUIKER lch AANMAKEN:
+#   # Dit wordt je DAGELIJKSE gebruiker
+#   # Vul in:
+#   #   Username: lch
+#   #   Full name: Linux Café Haarlem
+#   #   Password: [kies een sterk wachtwoord]
+#   
+#   # Belangrijk: Zet GEEN vinkje bij "Disable user login"
+#   # Zet WEL een vinkje bij "Default group: wheel" (sudo rechten)
+#   # Zet WEL een vinkje bij "Default group: video" (voor desktop)
+#
+# GROEPEN (wheel + video):
+#   # wheel groep = sudo rechten (essentieel!)
+#   # video groep = toegang tot GPU/versnelling (handig voor LXQT)
+#   # Beide groepen moeten aangevinkt zijn!
+#
+# =============================================================================
+# CHECKLIST tijdens installatie:
+# =============================================================================
+#
+# [ ] Root wachtwoord ingevoerd (sterk, veilig bewaard)
+# [ ] Gebruiker lch aangemaakt
+# [ ] Wachtwoord voor lch ingevoerd
+# [ ] Groep WHEEL aangevinkt (sudo rechten)
+# [ ] Groep VIDEO aangevinkt (desktop versnelling)
+# [ ] "Automatic login" UIT (veiliger)
+# [ ] "Use user password for system administrator" NIET aanvinken
+#
+# =============================================================================
+# NA DE INSTALLATIE:
+# =============================================================================
+#
+# # Log uit als root, log in als lch:
+# login: lch
+# password: [jouw wachtwoord]
+#
+# # Draai dan het playbook:
+# ansible-playbook -K lch-postinstall.yml
+#
+# # Het script vraagt om sudo wachtwoord:
+# BECOME password: [hetzelfde wachtwoord als lch]
+#
+# ============================================================================= =============================================================================
 # Playbook: lch-postinstall.yml
 # Doel: Post-installatie configuratie voor openSUSE Tumbleweed
 # =============================================================================
