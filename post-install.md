@@ -81,35 +81,35 @@ Niet inloggen als root! Log in als lch met je wachtwoord.
 
 Check of Ansible geïnstalleerd is:
 
-    ansible --version
+    `ansible --version`
 
 Mocht Ansible ontbreken:
 
-    sudo zypper install ansible python3
+    `sudo zypper install ansible python3`
 
 ### 2.3 Maak het playbook bestand
 
 Kopieer de inhoud van lch-postinstall.yml naar een bestand:
 
-    vim lch-postinstall.yml
+    `vim lch-postinstall.yml`
 
 Of download van een server:
 
-    wget http://jouw-server/lch-postinstall.yml
+    `wget http://jouw-server/lch-postinstall.yml`
 
 ### 2.4 Draai het playbook
 
 Voor de volledige installatie:
 
-    ansible-playbook -K lch-postinstall.yml
+    `ansible-playbook -K lch-postinstall.yml`
 
 Alleen basis (geen desktop, sneller voor servers):
 
-    ansible-playbook -K lch-postinstall.yml --skip-tags "desktop"
+    `ansible-playbook -K lch-postinstall.yml --skip-tags "desktop"`
 
 Alleen updates (na eerdere installatie):
 
-    ansible-playbook -K lch-postinstall.yml --tags "updates"
+    `ansible-playbook -K lch-postinstall.yml --tags "updates"`
 
 Je wordt gevraagd om het sudo wachtwoord. Typ het wachtwoord van lch.
 
@@ -132,35 +132,35 @@ Je wordt gevraagd om het sudo wachtwoord. Typ het wachtwoord van lch.
 
 Hostname checken:
 
-    hostname
+    `hostname`
 
 Sudo checken:
 
-    sudo whoami
+    `sudo whoami`
 
 Dit moet "root" tonen.
 
 SSH status:
 
-    sudo systemctl status sshd
+    `sudo systemctl status sshd`
 
 Firewall status:
 
-    sudo firewall-cmd --list-services
+    `sudo firewall-cmd --list-services`
 
 Tijdsynchronisatie:
 
-    timedatectl status
+    `timedatectl status`
 
 Fail2ban status:
 
-    sudo fail2ban-client status sshd
+    `sudo fail2ban-client status sshd`
 
 ### 3.2 Reboot indien nodig
 
 Als er een kernel update was:
 
-    sudo reboot
+    `sudo reboot`
 
 ### 3.3 Eindresultaat
 
@@ -171,90 +171,90 @@ Je ziet een samenvatting met alle configuratie. Het systeem is nu klaar voor geb
 ### Probleem: sudo: command not found
 
 Log in als root via de console:
-
+```bash
     su -
     zypper install sudo
     usermod -aG wheel lch
     exit
-
+```
 ### Probleem: Ansible playbook faalt
 
 Check syntax:
 
-    ansible-playbook --syntax-check lch-postinstall.yml
+    `ansible-playbook --syntax-check lch-postinstall.yml`
 
 Draai met extra uitvoer:
 
-    ansible-playbook -K lch-postinstall.yml -vvv
+    `ansible-playbook -K lch-postinstall.yml -vvv`
 
 Draai alleen specifieke delen:
 
-    ansible-playbook -K lch-postinstall.yml --tags "ssh,firewall"
+    `ansible-playbook -K lch-postinstall.yml --tags "ssh,firewall"`
 
 ### Probleem: Geen internet na installatie
 
 Check NetworkManager:
 
-    sudo systemctl status NetworkManager
+    `sudo systemctl status NetworkManager`
 
 Start handmatig:
 
-    sudo systemctl start NetworkManager
+    `sudo systemctl start NetworkManager`
 
 Verbind met netwerk (voorbeeld):
 
-    sudo nmcli device connect eth0
+    `sudo nmcli device connect eth0`
 
 ### Probleem: LightDM start niet
 
 Check status:
 
-    sudo systemctl status lightdm
+    `sudo systemctl status lightdm`
 
 Bekijk logs:
 
-    journalctl -u lightdm
+    `journalctl -u lightdm`
 
 Start X handmatig als fallback:
 
-    startx
+    `startx`
 
 ## Handige commando's
 
 Systeem updates na installatie:
 
-    sudo zypper dup
+    `sudo zypper dup`
 
 Check of reboot nodig is:
 
-    ls /var/run/reboot-needed
+    `ls /var/run/reboot-needed`
 
 Logs bekijken:
 
-    journalctl -f
+    `journalctl -f`
 
 Services status:
 
-    sudo systemctl status sshd firewalld chronyd fail2ban
+    `sudo systemctl status sshd firewalld chronyd fail2ban`
 
 IP adres bekijken:
 
-    ip addr show
+    `ip addr show`
 
 WiFi verbinden (indien geen desktop):
-
+```bash
     nmcli device wifi list
     nmcli device wifi connect "SSID" password "wachtwoord"
-
+```
 Vanaf een andere machine verbinden:
 
-    ssh lch@[ip-adres]
+    `ssh lch@[ip-adres]`
 
 SSH key instellen (aanbevolen):
-
+```bash
     ssh-keygen -t ed25519
     ssh-copy-id lch@[ip-adres]
-
+```
 ## Checklist
 
 Tijdens installatie:
