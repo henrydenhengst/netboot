@@ -1,17 +1,22 @@
 #!/bin/bash
 # =============================================================================
-# lch-check.sh - LCH Init systeem check
+# lch-check.sh - LCH Init systeem check met AI debugging
 # =============================================================================
 
 # Kleuren
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
 NC='\033[0m'
 
 # Tellers
 PASS=0
 FAIL=0
+ERROR_LOG="/tmp/lch-check-errors.log"
+
+# Leeg de error log
+> $ERROR_LOG
 
 check_pass() {
     echo -e "${GREEN}✅ PASS${NC} - $1"
@@ -20,11 +25,13 @@ check_pass() {
 
 check_fail() {
     echo -e "${RED}❌ FAIL${NC} - $1"
+    echo "[FAIL] $1" >> $ERROR_LOG
     ((FAIL++))
 }
 
 check_warn() {
     echo -e "${YELLOW}⚠️ WARN${NC} - $1"
+    echo "[WARN] $1" >> $ERROR_LOG
 }
 
 echo ""
@@ -97,19 +104,19 @@ fi
 echo ""
 echo "--- SSH HARDENING ---"
 
-if grep -q "^PermitRootLogin no" /etc/ssh/sshd_config; then
+if grep -q "^PermitRootLogin no" /etc/ssh/sshd_config 2>/dev/null; then
     check_pass "Root login uitgeschakeld"
 else
     check_fail "Root login nog ingeschakeld"
 fi
 
-if grep -q "^PasswordAuthentication no" /etc/ssh/sshd_config; then
+if grep -q "^PasswordAuthentication no" /etc/ssh/sshd_config 2>/dev/null; then
     check_pass "Wachtwoord auth uitgeschakeld"
 else
     check_fail "Wachtwoord auth nog ingeschakeld"
 fi
 
-if grep -q "^AllowUsers lch" /etc/ssh/sshd_config; then
+if grep -q "^AllowUsers lch" /etc/ssh/sshd_config 2>/dev/null; then
     check_pass "Alleen lch mag inloggen"
 else
     check_warn "AllowUsers niet geconfigureerd"
@@ -134,7 +141,7 @@ fi
 echo ""
 echo "--- SSD TRIM ---"
 
-if systemctl is-active --quiet fstrim.timer; then
+if systemctl is-active --quiet fstrim.timer 2>/dev/null; then
     check_pass "fstrim.timer is actief"
 else
     if lsblk -dno rota 2>/dev/null | grep -q "^0$"; then
@@ -168,26 +175,22 @@ fi
 echo ""
 echo "--- FAIL2BAN ---"
 
-if systemctl is-active --quiet fail2ban; then
+if systemctl is-active --quiet fail2ban 2>/dev/null; then
     check_pass "fail2ban is actief"
-    if fail2ban-client status sshd 2>/dev/null | grep -q "Banned.*[1-9]"; then
-        BANNED=$(fail2ban-client status sshd 2>/dev/null | grep "Banned" | awk '{print $4}')
-        check_warn "$BANNED IP(s) zijn verbannen"
-    fi
 else
     check_warn "fail2ban is niet actief (optioneel)"
 fi
 
 # -----------------------------------------------------------------------------
-# 10. LOGGING CHECK
+# 10. PLAYBOOK BESTAAT
 # -----------------------------------------------------------------------------
 echo ""
-echo "--- LOGGING ---"
+echo "--- PLAYBOOK ---"
 
-if [ -d "/var/log/journal" ]; then
-    check_pass "Persistent journald actief"
+if [ -f "lch-postinstall.yml" ]; then
+    check_pass "Playbook gevonden: lch-postinstall.yml"
 else
-    check_warn "Persistent journald niet actief"
+    check_fail "Playbook niet gevonden (lch-postinstall.yml)"
 fi
 
 # -----------------------------------------------------------------------------
@@ -204,10 +207,31 @@ echo ""
 if [ $FAIL -eq 0 ]; then
     echo -e "${GREEN}✅ ALLES GOED! Systeem is correct geconfigureerd.${NC}"
 else
-    echo -e "${RED}❌ Er zijn $FAIL proble(a)m(en). Draai het playbook opnieuw.${NC}"
+    echo -e "${RED}❌ Er zijn $FAIL proble(a)m(en).${NC}"
     echo ""
-    echo "Herstel commando:"
-    echo "  ansible-playbook -K lch-postinstall.yml"
+    echo "=========================================="
+    echo "           DEBUG INSTRUCTIES"
+    echo "=========================================="
+    echo ""
+    echo "1. Foutlog is opgeslagen:"
+    echo "   cat $ERROR_LOG"
+    echo ""
+    echo "2. Deel de volgende informatie met DeepSeek AI:"
+    echo "   ---"
+    echo "   Systeem: openSUSE Tumbleweed"
+    echo "   Gebruiker: $CURRENT_USER"
+    echo "   Hostname: $HOSTNAME"
+    echo "   ---"
+    echo "   Fouten:"
+    cat $ERROR_LOG | sed 's/^/   /'
+    echo "   ---"
+    echo ""
+    echo "3. Kopieer bovenstaande output en stuur naar:"
+    echo -e "   ${BLUE}https://chat.deepseek.com${NC}"
+    echo ""
+    echo "4. Herstel commando's (indien bekend):"
+    echo "   ansible-playbook -K lch-postinstall.yml --tags \"hostname,ssh,firewall\""
+    echo ""
 fi
 
 echo ""
