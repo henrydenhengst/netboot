@@ -4,7 +4,15 @@
 # Doel: Post-installatie configuratie voor openSUSE Tumbleweed
 # Gebruik:
 #   ansible-playbook -i inventory.ini lch-postinstall.yml --tags "ssh,firewall"
-# =============================================================================
+#
+# ZONDER tags (voert ALLES uit)
+# ansible-playbook -K lch-postinstall.yml
+#
+# MET tags (alleen specifieke onderdelen)
+# ansible-playbook -K lch-postinstall.yml --tags "ssh,firewall"
+#
+# ALLES behalve bepaalde tags
+# ansible-playbook -K lch-postinstall.yml --skip-tags "desktop,updates" =============================================================================
 
 - name: LCH Init - Post-installatie configuratie
   hosts: localhost
