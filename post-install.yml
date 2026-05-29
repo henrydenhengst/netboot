@@ -2,74 +2,40 @@
 # =============================================================================
 # Playbook: lch-postinstall.yml
 # Doel: Post-installatie configuratie voor openSUSE Tumbleweed
-# Gebruik:
-#   ansible-playbook -i inventory.ini lch-postinstall.yml --tags "ssh,firewall"
-#
-# ZONDER tags (voert ALLES uit)
-# ansible-playbook -K lch-postinstall.yml
-#
-# MET tags (alleen specifieke onderdelen)
-# ansible-playbook -K lch-postinstall.yml --tags "ssh,firewall"
-#
-# ALLES behalve bepaalde tags
-# ansible-playbook -K lch-postinstall.yml --skip-tags "desktop,updates"
-#
-# =============================================================================
-# INSTRUCTIES - LEES DIT EERST!
 # =============================================================================
 #
 # GEBRUIK:
 #   ansible-playbook -K lch-postinstall.yml
 #
 # OPTIES:
-#   -K, --ask-become-pass    Vraagt om sudo wachtwoord (verplicht als sudo wachtwoord heeft)
+#   -K, --ask-become-pass    Vraagt om sudo wachtwoord (verplicht)
 #
-# TAG FILTERING (alleen specifieke onderdelen uitvoeren):
+# TAG FILTERING:
 #   --tags "ssh,firewall"    Alleen SSH en firewall
 #   --skip-tags "updates"    Alles behalve systeem updates
 #   --tags "desktop"         Alleen desktop configuratie
-#   --tags "security"        Alleen security (ssh,firewall,security,fail2ban)
 #
 # BESCHIKBARE TAGS:
-#   hostname    - Hostnaam bepalen en instellen (serial/uuid)
-#   sudo        - Sudo rechten voor lch user
-#   ssh         - SSH hardening (geen root login, password auth uit, etc.)
-#   firewall    - Firewalld installeren en SSH poort openen
-#   storage     - SSD detectie en fstrim timer
-#   updates     - Zypper refresh en distribution upgrade (dup)
-#   time        - Chrony installeren + Nederlandse NTP pool
-#   network     - NetworkManager inschakelen, wicked uitschakelen
-#   logging     - Persistent journald (max 1GB)
-#   desktop     - LightDM + LXQT configuratie
-#   security    - Fail2ban installatie (extra hardening)
-#   fail2ban    - Alleen fail2ban (onderdeel van security)
-#   reboot      - Checken of reboot nodig is + uitvoeren
-#   summary     - Eindoverzicht met alle status
+#   hostname, sudo, ssh, firewall, storage, updates, time, network,
+#   logging, desktop, security, fail2ban, reboot, summary
 #
 # VOORBEELDEN:
-#   # Eerste keer - alleen basis (geen updates, geen desktop)
+#   # Eerste keer - alleen basis
 #   ansible-playbook -K lch-postinstall.yml --tags "hostname,sudo,ssh,firewall"
 #
 #   # Snelle run - alles behalve updates
 #   ansible-playbook -K lch-postinstall.yml --skip-tags "updates"
 #
-#   # Alleen desktop (na basis installatie)
-#   ansible-playbook -K lch-postinstall.yml --tags "desktop"
-#
-#   # Volledige installatie (geen tag filtering)
+#   # Volledige installatie
 #   ansible-playbook -K lch-postinstall.yml
 #
-# INVENTORY:
-#   - Geen inventory bestand nodig voor localhost
-#   - Standaard draait playbook op localhost
-#   - Voor remote hosts: -i hostname, (let op de komma!)
-#
 # LET OP:
-#   - Dit playbook is voor openSUSE Tumbleweed
-#   - Vereist root/sudo rechten (daarom -K)
-#   - Kan herhaald worden (idempotent)
+#   - openSUSE Tumbleweed only
+#   - Vereist sudo rechten (-K)
+#   - Idempotent (kan herhaald worden)
+#   - Geen inventory nodig voor localhost
 #
-# ============================================================================= =============================================================================
+# =============================================================================
 
 - name: LCH Init - Post-installatie configuratie
   hosts: localhost
@@ -90,7 +56,7 @@
   tasks:
 
     # =========================================================================
-    # 1. ROBUUSTE HOSTNAME
+    # 1. HOSTNAME CONFIGURATIE
     # =========================================================================
     - name: Lees product serial
       slurp:
@@ -191,7 +157,7 @@
       tags: [sudo]
 
     # =========================================================================
-    # 3. SSH HARDENING (met validatie)
+    # 3. SSH HARDENING
     # =========================================================================
     - name: Configureer SSH hardening opties
       lineinfile:
@@ -219,9 +185,9 @@
       tags: [ssh]
 
     # =========================================================================
-    # 4. FIREWALLD (met race condition fix)
+    # 4. FIREWALLD
     # =========================================================================
-    - name: Installeer firewalld dependencies
+    - name: Installeer firewalld
       package:
         name:
           - firewalld
@@ -229,7 +195,7 @@
         state: present
       tags: [firewall]
 
-    - name: Enable firewalld
+    - name: Start firewalld
       systemd:
         name: firewalld
         enabled: true
@@ -241,18 +207,16 @@
         timeout: 5
       tags: [firewall]
 
-    - name: Configureer firewall zones en services
+    - name: Open SSH poort in firewall
       firewalld:
-        service: "{{ item }}"
+        service: ssh
         permanent: true
         immediate: true
         state: enabled
-      loop:
-        - ssh
       tags: [firewall]
 
     # =========================================================================
-    # 5. SSD / FILESYSTEM OPTIMALISATIE
+    # 5. SSD OPTIMALISATIE
     # =========================================================================
     - name: Detecteer SSD disks
       shell: lsblk -dno rota | grep -q '^0$'
@@ -270,7 +234,7 @@
       tags: [storage]
 
     # =========================================================================
-    # 6. TUMBLEWEED UPDATES (met block/rescue)
+    # 6. SYSTEEM UPDATES
     # =========================================================================
     - block:
         - name: Refresh zypper repositories
@@ -310,7 +274,7 @@
       tags: [updates]
 
     # =========================================================================
-    # 7. CHRONY (tijdsynchronisatie)
+    # 7. TIJDSSYNCHRONISATIE
     # =========================================================================
     - name: Installeer chrony
       package:
@@ -326,7 +290,7 @@
       notify: restart chronyd
       tags: [time]
 
-    - name: Enable chronyd
+    - name: Start chronyd
       systemd:
         name: chronyd
         enabled: true
@@ -336,7 +300,7 @@
     # =========================================================================
     # 8. NETWORKMANAGER
     # =========================================================================
-    - name: Enable NetworkManager
+    - name: Start NetworkManager
       systemd:
         name: NetworkManager
         enabled: true
@@ -347,7 +311,7 @@
       service_facts:
       tags: [network]
 
-    - name: Disable wicked indien actief
+    - name: Schakel wicked uit indien actief
       systemd:
         name: wicked
         enabled: false
@@ -359,7 +323,7 @@
       tags: [network]
 
     # =========================================================================
-    # 9. JOURNALD PERSISTENT LOGGING
+    # 9. LOGGING CONFIGURATIE
     # =========================================================================
     - name: Enable persistent journald logging
       file:
@@ -379,7 +343,7 @@
       tags: [logging]
 
     # =========================================================================
-    # 10. LIGHTDM + LXQT CONFIGURATIE
+    # 10. DESKTOP CONFIGURATIE (LXQT + LightDM)
     # =========================================================================
     - name: Verzamel package facts
       package_facts:
@@ -414,7 +378,7 @@
       when: "'lightdm-gtk-greeter' in ansible_facts.packages"
       tags: [desktop]
 
-    - name: Enable LightDM
+    - name: Start LightDM
       systemd:
         name: lightdm
         enabled: true
@@ -422,7 +386,7 @@
       tags: [desktop]
 
     # =========================================================================
-    # 11. FAIL2BAN (optioneel)
+    # 11. FAIL2BAN (OPTIONEEL)
     # =========================================================================
     - name: Install fail2ban
       package:
@@ -449,7 +413,7 @@
       notify: restart fail2ban
       tags: [security, fail2ban]
 
-    - name: Enable fail2ban
+    - name: Start fail2ban
       systemd:
         name: fail2ban
         enabled: true
@@ -458,9 +422,9 @@
       tags: [security, fail2ban]
 
     # =========================================================================
-    # 12. REBOOT HANDLING (gefixte versie)
+    # 12. REBOOT HANDLING
     # =========================================================================
-    - name: Check of reboot indicator bestaat
+    - name: Check of reboot nodig is
       stat:
         path: /var/run/reboot-needed
       register: reboot_required
