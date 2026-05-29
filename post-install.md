@@ -78,7 +78,6 @@ Niet inloggen als root! Log in als lch met je wachtwoord.
 ### 2.2 Ansible en git installeren 
 
 ```bash
-#!/bin/bash
 zypper --non-interactive refresh
 zypper --non-interactive install ansible git python3
 ```
