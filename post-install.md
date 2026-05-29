@@ -69,33 +69,25 @@ Kies tijdens installatie:
 - Base System
 - X Window System
 
-Ansible wordt later door het playbook geïnstalleerd.
-
 ## Stap 2: Post-Installatie met Ansible
 
 ### 2.1 Inloggen na reboot
 
 Niet inloggen als root! Log in als lch met je wachtwoord.
 
-### 2.2 Controleer of Ansible werkt
+### 2.2 Ansible en git installeren 
 
-Check of Ansible geïnstalleerd is:
-
-    `ansible --version`
-
-Mocht Ansible ontbreken:
-
-    `sudo zypper install ansible python3`
+```bash
+#!/bin/bash
+zypper --non-interactive refresh
+zypper --non-interactive install ansible git python3
+```
 
 ### 2.3 Maak het playbook bestand
 
-Kopieer de inhoud van lch-postinstall.yml naar een bestand:
+Kopieer de inhoud van postinstall.yml naar een bestand:
 
-    `vim lch-postinstall.yml`
-
-Of download van een server:
-
-    `wget http://jouw-server/lch-postinstall.yml`
+    `vim postinstall.yml`
 
 ### 2.4 Draai het playbook
 
