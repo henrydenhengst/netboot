@@ -12,7 +12,64 @@
 # ansible-playbook -K lch-postinstall.yml --tags "ssh,firewall"
 #
 # ALLES behalve bepaalde tags
-# ansible-playbook -K lch-postinstall.yml --skip-tags "desktop,updates" =============================================================================
+# ansible-playbook -K lch-postinstall.yml --skip-tags "desktop,updates"
+#
+# =============================================================================
+# INSTRUCTIES - LEES DIT EERST!
+# =============================================================================
+#
+# GEBRUIK:
+#   ansible-playbook -K lch-postinstall.yml
+#
+# OPTIES:
+#   -K, --ask-become-pass    Vraagt om sudo wachtwoord (verplicht als sudo wachtwoord heeft)
+#
+# TAG FILTERING (alleen specifieke onderdelen uitvoeren):
+#   --tags "ssh,firewall"    Alleen SSH en firewall
+#   --skip-tags "updates"    Alles behalve systeem updates
+#   --tags "desktop"         Alleen desktop configuratie
+#   --tags "security"        Alleen security (ssh,firewall,security,fail2ban)
+#
+# BESCHIKBARE TAGS:
+#   hostname    - Hostnaam bepalen en instellen (serial/uuid)
+#   sudo        - Sudo rechten voor lch user
+#   ssh         - SSH hardening (geen root login, password auth uit, etc.)
+#   firewall    - Firewalld installeren en SSH poort openen
+#   storage     - SSD detectie en fstrim timer
+#   updates     - Zypper refresh en distribution upgrade (dup)
+#   time        - Chrony installeren + Nederlandse NTP pool
+#   network     - NetworkManager inschakelen, wicked uitschakelen
+#   logging     - Persistent journald (max 1GB)
+#   desktop     - LightDM + LXQT configuratie
+#   security    - Fail2ban installatie (extra hardening)
+#   fail2ban    - Alleen fail2ban (onderdeel van security)
+#   reboot      - Checken of reboot nodig is + uitvoeren
+#   summary     - Eindoverzicht met alle status
+#
+# VOORBEELDEN:
+#   # Eerste keer - alleen basis (geen updates, geen desktop)
+#   ansible-playbook -K lch-postinstall.yml --tags "hostname,sudo,ssh,firewall"
+#
+#   # Snelle run - alles behalve updates
+#   ansible-playbook -K lch-postinstall.yml --skip-tags "updates"
+#
+#   # Alleen desktop (na basis installatie)
+#   ansible-playbook -K lch-postinstall.yml --tags "desktop"
+#
+#   # Volledige installatie (geen tag filtering)
+#   ansible-playbook -K lch-postinstall.yml
+#
+# INVENTORY:
+#   - Geen inventory bestand nodig voor localhost
+#   - Standaard draait playbook op localhost
+#   - Voor remote hosts: -i hostname, (let op de komma!)
+#
+# LET OP:
+#   - Dit playbook is voor openSUSE Tumbleweed
+#   - Vereist root/sudo rechten (daarom -K)
+#   - Kan herhaald worden (idempotent)
+#
+# ============================================================================= =============================================================================
 
 - name: LCH Init - Post-installatie configuratie
   hosts: localhost
