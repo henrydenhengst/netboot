@@ -136,11 +136,25 @@ Je kunt ook de post-installatie scripts aanpassen om extra packages te installer
 
 ---
 
-## ✅ Conclusie
 
-Met de HP Z420 kun je 100 clients tegelijk installeren. De server kan het aan. De beperkingen zitten in de praktijk: switch, stroom, ruimte en bekabeling.
 
-**De clients zijn allemaal klaar in 10-15 minuten.** 🚀
+---
+
+📊 Wat er gebeurt bij 100 clients op 1 Gb
+
+Onderdeel Belasting bij 100 clients Conclusie
+Netwerk 500-800 Mbps 1 Gb is voldoende
+Server CPU 20-30% Xeon kan dit makkelijk aan
+Server RAM 4-6 GB 32 GB is meer dan genoeg
+Server SSD Weinig belasting DVD wordt in RAM gecached
+
+---
+
+✅ Conclusie
+
+Met een 1 Gb geswitched netwerk kun je 100 clients tegelijk installeren. De server en het netwerk kunnen het aan. De enige beperkingen zijn praktisch: heb je genoeg stopcontacten, ruimte en kabels?
+
+Technisch gezien: ja, 100 kan. Praktisch gezien: regel je stroom en ruimte. 🚀
 
 ---
 
