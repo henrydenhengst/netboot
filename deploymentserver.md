@@ -1,5 +1,7 @@
 # 🚀 Debian 13 Deployment Server - Complete Setup Guide
 
+BIOS-check is een must: Zet de machine aan en druk op F10 om de BIOS te openen. Controleer of PXE-boot is ingeschakeld en zet de boot-modus op UEFI voor de beste resultaten.
+
 ## 📋 Overzicht
 
 Dit project bevat alles wat je nodig hebt om een **volledige PXE-deployment server** op te zetten voor Debian 13 (Trixie). Het systeem werkt op alle 64-bit computers van 2006 tot 2026 en ondersteunt zowel BIOS als UEFI.
