@@ -1,5 +1,7 @@
 # 🚀 Debian 13 Deployment Server - Complete Setup Guide
 
+## Test het script eerst op een test pc !!?
+
 BIOS-check is een must: Zet de machine aan en druk op F10 om de BIOS te openen. Controleer of PXE-boot is ingeschakeld en zet de boot-modus op UEFI voor de beste resultaten.
 
 1. Zet de Z420 aan en druk op F10 voor de BIOS
