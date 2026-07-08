@@ -113,6 +113,37 @@ Je kunt ook de post-installatie scripts aanpassen om extra packages te installer
 
 ---
 
+## 📊 Maximaal aantal gelijktijdige clients
+
+| Component | Capaciteit | Opmerking |
+|-----------|------------|-----------|
+| HP Z420 server | 100+ clients | Xeon, 32GB RAM, SSD |
+| Netwerkkaart | 100 clients | Intel Gigabit |
+| Switch | Afhankelijk | Zorg voor voldoende poorten |
+| DHCP pool | 101 adressen | 10.0.0.100 t/m 10.0.0.200 |
+
+---
+
+## 🎯 Praktische limieten
+
+| Factor | Limiet | Uitleg |
+|--------|--------|--------|
+| Server | 100+ | CPU en RAM zijn prima |
+| Netwerk | 50-100 | Afhankelijk van switch en kabels |
+| Stroom | Praktisch | 100 computers = veel stopcontacten |
+| Ruimte | Praktisch | 100 computers = veel tafels/rekken |
+| Tijd | 10-15 min | Alle clients tegelijk klaar |
+
+---
+
+## ✅ Conclusie
+
+Met jouw HP Z420 kun je 100 clients tegelijk installeren. De server kan het aan. De beperkingen zitten in de praktijk: switch, stroom, ruimte en bekabeling.
+
+**De clients zijn allemaal klaar in 10-15 minuten.** 🚀
+
+---
+
 ## 📚 Meer informatie
 
 - Debian 13 officiële documentatie: https://www.debian.org/doc/
