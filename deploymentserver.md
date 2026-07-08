@@ -73,7 +73,7 @@ Standaard worden deze wachtwoorden gebruikt, maar ze zijn encrypted opgeslagen i
 - KDE gebruiker: gebruikersnaam `kde`, wachtwoord `kde123`
 - Server admin: gebruikersnaam `admin`, wachtwoord `admin123`
 
-Om de wachtwoorden te wijzigen, pas je de variabelen aan in het begin van het `deploy-server.sh` script. De variabelen heten `XFCE_PASS`, `GNOME_PASS`, `KDE_PASS`, en `ADMIN_PASS`. Na het wijzigen draai je het script opnieuw.
+Om de wachtwoorden te wijzigen, pas je de variabelen aan in het begin van het `deploymentserver.sh` script. De variabelen heten `XFCE_PASS`, `GNOME_PASS`, `KDE_PASS`, en `ADMIN_PASS`. Na het wijzigen draai je het script opnieuw.
 
 ### Logbestanden
 
@@ -102,8 +102,6 @@ Als de NFS repository niet gemount kan worden, controleer dan of de DVD nog gemo
 Na een geslaagde installatie kun je het systeem verder uitbreiden. Je kunt extra desktops toevoegen door nieuwe preseed bestanden te maken in `/srv/tftp/preseed/` en ze toe te voegen aan het PXE menu in `/srv/tftp/pxelinux.cfg/default`.
 
 Je kunt ook de post-installatie scripts aanpassen om extra packages te installeren of specifieke configuraties toe te voegen. Het script is modulair opgebouwd, dus je kunt functies toevoegen of uitschakelen door ze te becommentariëren.
-
-Voor grotere omgevingen kun je overwegen om Ansible te integreren. Gebruik dan de PXE installatie alleen voor de basis installatie, en laat Ansible de verdere configuratie doen. Dit maakt het beheer van honderden clients een stuk eenvoudiger.
 
 ---
 
