@@ -138,7 +138,7 @@ Je kunt ook de post-installatie scripts aanpassen om extra packages te installer
 
 ## ✅ Conclusie
 
-Met jouw HP Z420 kun je 100 clients tegelijk installeren. De server kan het aan. De beperkingen zitten in de praktijk: switch, stroom, ruimte en bekabeling.
+Met de HP Z420 kun je 100 clients tegelijk installeren. De server kan het aan. De beperkingen zitten in de praktijk: switch, stroom, ruimte en bekabeling.
 
 **De clients zijn allemaal klaar in 10-15 minuten.** 🚀
 
