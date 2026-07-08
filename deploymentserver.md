@@ -2,6 +2,12 @@
 
 BIOS-check is een must: Zet de machine aan en druk op F10 om de BIOS te openen. Controleer of PXE-boot is ingeschakeld en zet de boot-modus op UEFI voor de beste resultaten.
 
+1. Zet de Z420 aan en druk op F10 voor de BIOS
+2. Zoek naar "Boot Mode" of "Option ROM Launch Policy"
+3. Zet deze op UEFI-only of UEFI (niet Legacy)
+4. Zorg dat "Network Boot" of "PXE" is ingeschakeld
+5. Sla op en start opnieuw op
+
 ## 📋 Overzicht
 
 Dit project bevat alles wat je nodig hebt om een **volledige PXE-deployment server** op te zetten voor Debian 13 (Trixie). Het systeem werkt op alle 64-bit computers van 2006 tot 2026 en ondersteunt zowel BIOS als UEFI.
