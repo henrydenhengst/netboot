@@ -257,7 +257,9 @@ echo "  3. Bekijk TFTP-logs:   podman logs -f netbootxyz"
 echo "  4. Bekijk DHCP-logs:   journalctl -u dnsmasq -f"
 echo "  5. Test web UI:        curl -I http://${IP_ONLY}:3000"
 echo "  6. Test assets:        curl -I http://${IP_ONLY}/"
-echo "===================================================="
+echo
+echo ". 7. Hier eventuele iso's plaatsen: /opt/netbootxyz/assets"
+"===================================================="
 
 # --- REBOOT CHECK ---
 if needs-restarting -r &>/dev/null; then
