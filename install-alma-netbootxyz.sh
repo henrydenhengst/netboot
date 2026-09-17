@@ -258,7 +258,9 @@ echo "  4. Bekijk DHCP-logs:   journalctl -u dnsmasq -f"
 echo "  5. Test web UI:        curl -I http://${IP_ONLY}:3000"
 echo "  6. Test assets:        curl -I http://${IP_ONLY}/"
 echo
-echo ". 7. Hier eventuele iso's plaatsen: /opt/netbootxyz/assets"
+echo ". 7. Hier eventuele iso's plaatsen: /opt/netbootxyz/assets 
+met de rechten: sudo chmod -R 755 /opt/netbootxyz/assets
+sudo chown -R 1000:1000 /opt/netbootxyz/assets "
 "===================================================="
 
 # --- REBOOT CHECK ---
