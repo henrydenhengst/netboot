@@ -1,367 +1,417 @@
-#!/bin/bash
-
+#!/usr/bin/env bash
+#
 # ============================================================
-# Debian 13 NETBOOT SERVER
+# FreeBoot Deployment / PXE Server
+# Debian 13
 # ============================================================
 #
-# Doel:
-#   Debian 13 voorbereiden als PXE/netboot-server.
+# BELANGRIJK
 #
-# HUIDIGE SITUATIE:
-#   Server hangt nog aan het productienetwerk.
+# Dit script WIJZIGT GEEN NETWERKCONFIGURATIE.
 #
-# DHCP:
-#   NIET op deze server.
-#   DHCP wordt later door OPNsense verzorgd.
+# Het script:
+#   - verandert geen IP-adres
+#   - verandert geen gateway
+#   - verandert geen routes
+#   - verandert geen DNS van de server
+#   - wijzigt /etc/network/interfaces niet
+#   - gebruikt geen nmcli
 #
-# Deze versie installeert:
-#   - dnsmasq : uitsluitend TFTP
-#   - nginx   : HTTP
-#   - Debian 13 PXE bestanden
+# De server kan dit script dus veilig uitvoeren terwijl hij
+# nog op het productienetwerk zit.
 #
-# Ondersteuning:
-#   - UEFI
-#   - BIOS/Legacy
+# Na uitvoering:
+#
+#   1. Server uitschakelen
+#   2. Netwerkkabel naar deploymentnetwerk
+#   3. Server starten
+#   4. Controleren via 10.90.90.10
 #
 # ============================================================
 
 set -euo pipefail
 
-TFTP_DIR="/srv/tftp"
-HTTP_DIR="/var/www/html/debian"
+# ============================================================
+# INSTELLINGEN
+# ============================================================
 
-DEBIAN_URL="https://deb.debian.org/debian/dists/trixie/main/installer-amd64/current/images/netboot/netboot.tar.gz"
+HOSTNAME="deployment-server"
+INTERFACE="eno1"
 
-TMP_FILE="/tmp/debian-netboot.tar.gz"
+SERVER_IP="10.90.90.10"
+CIDR="24"
+GATEWAY="10.90.90.1"
 
-# ------------------------------------------------------------
-# Kleuren
-# ------------------------------------------------------------
+DHCP_START="10.90.90.100"
+DHCP_END="10.90.90.200"
+DHCP_LEASE="12h"
 
-GREEN="\033[0;32m"
-YELLOW="\033[1;33m"
-RED="\033[0;31m"
-NC="\033[0m"
+DNS1="9.9.9.9"
+DNS2="1.1.1.1"
 
-ok() {
-    echo -e "${GREEN}[OK]${NC} $1"
-}
+NETBOOT_IMAGE="ghcr.io/netbootxyz/netbootxyz:latest"
+
+NETBOOT_DIR="/opt/netbootxyz"
+NETBOOT_CONFIG="${NETBOOT_DIR}/config"
+NETBOOT_ASSETS="${NETBOOT_DIR}/assets"
+
+DNSMASQ_CONFIG="/etc/dnsmasq.d/freeboot-pxe.conf"
+SYSTEMD_SERVICE="/etc/systemd/system/netbootxyz.service"
+
+# ============================================================
+# FUNCTIES
+# ============================================================
 
 info() {
-    echo -e "${YELLOW}[INFO]${NC} $1"
+    echo
+    echo "==> $1"
 }
 
 error() {
-    echo -e "${RED}[FOUT]${NC} $1"
+    echo
+    echo "FOUT: $1" >&2
+    exit 1
 }
 
-# ------------------------------------------------------------
-# Root controleren
-# ------------------------------------------------------------
+# ============================================================
+# ROOT
+# ============================================================
 
-if [ "$EUID" -ne 0 ]; then
-    error "Start dit script met sudo:"
-    echo
-    echo "sudo $0"
-    exit 1
+if [[ "${EUID}" -ne 0 ]]; then
+    error "Voer dit script uit als root."
 fi
 
-# ------------------------------------------------------------
-# Debian controleren
-# ------------------------------------------------------------
+# ============================================================
+# DEBIAN CONTROLEREN
+# ============================================================
 
-if [ ! -f /etc/debian_version ]; then
-    error "Dit systeem lijkt geen Debian te zijn."
-    exit 1
+info "Debian controleren"
+
+if [[ ! -f /etc/debian_version ]]; then
+    error "Dit script is bedoeld voor Debian."
 fi
 
-. /etc/os-release
+# ============================================================
+# NETWERK ALLEEN CONTROLEREN
+# ============================================================
 
-if [ "${ID:-}" != "debian" ]; then
-    error "Dit systeem is geen Debian."
-    exit 1
+info "Netwerkinterface controleren"
+
+if ! ip link show "${INTERFACE}" >/dev/null 2>&1; then
+    error "Interface ${INTERFACE} bestaat niet."
 fi
 
 echo
-echo "============================================================"
-echo " Debian 13 Netboot Server"
-echo "============================================================"
-echo
-echo "DHCP wordt NIET geconfigureerd."
-echo "De server kan dus op het productienetwerk blijven."
+echo "Huidige netwerkconfiguratie:"
 echo
 
-# ------------------------------------------------------------
-# Netwerk tonen
-# ------------------------------------------------------------
+ip -4 addr show dev "${INTERFACE}" || true
 
-info "Huidige netwerkconfiguratie:"
-ip -br addr
 echo
+ip route || true
 
-# ------------------------------------------------------------
-# Pakketten
-# ------------------------------------------------------------
+echo
+echo "LET OP:"
+echo "Dit script verandert bovenstaande netwerkconfiguratie NIET."
 
-echo "============================================================"
-echo "1. Pakketten installeren"
-echo "============================================================"
+# ============================================================
+# BESTAANDE SOFTWARE CONTROLEREN
+# ============================================================
+
+info "Bestaande installatie controleren"
+
+if ! command -v podman >/dev/null 2>&1; then
+    error "Podman is niet geïnstalleerd."
+fi
+
+if ! command -v ufw >/dev/null 2>&1; then
+    error "UFW is niet geïnstalleerd."
+fi
+
+if ! command -v systemctl >/dev/null 2>&1; then
+    error "systemd is niet beschikbaar."
+fi
+
+# ============================================================
+# HOSTNAME
+# ============================================================
+
+info "Hostname instellen"
+
+hostnamectl set-hostname "${HOSTNAME}"
+
+# ============================================================
+# BENODIGDE PAKKETTEN
+# ============================================================
+
+info "Benodigde pakketten installeren"
 
 apt-get update
 
 apt-get install -y \
-    dnsmasq \
-    nginx \
-    curl \
     ca-certificates \
-    tar
+    curl \
+    wget \
+    tar \
+    dnsmasq
 
-ok "Benodigde pakketten geïnstalleerd."
-
-# ------------------------------------------------------------
-# dnsmasq configuratie
-# ------------------------------------------------------------
-
-echo
-echo "============================================================"
-echo "2. dnsmasq configureren"
-echo "============================================================"
-
-mkdir -p /etc/dnsmasq.d
-mkdir -p "$TFTP_DIR"
-
-# Oude FreeBoot/netboot configuratie verwijderen
-rm -f /etc/dnsmasq.d/netboot.conf
-
-cat > /etc/dnsmasq.d/netboot.conf <<'EOF'
 # ============================================================
-# FreeBoot Debian Netboot
-# ============================================================
-#
-# DHCP staat UIT.
-# OPNsense verzorgt later DHCP.
-#
-# dnsmasq doet hier alleen TFTP.
+# NETBOOT DIRECTORIES
 # ============================================================
 
+info "Netboot directories aanmaken"
+
+mkdir -p "${NETBOOT_CONFIG}"
+mkdir -p "${NETBOOT_ASSETS}"
+
+# ============================================================
+# BESTAANDE NETBOOT.XYZ CONTAINER
+# ============================================================
+
+info "Bestaande netboot.xyz container controleren"
+
+if podman container exists netbootxyz; then
+    echo "Bestaande container gevonden."
+
+    podman stop netbootxyz 2>/dev/null || true
+    podman rm netbootxyz 2>/dev/null || true
+fi
+
+# ============================================================
+# NETBOOT.XYZ IMAGE
+# ============================================================
+
+info "netboot.xyz image ophalen"
+
+podman pull "${NETBOOT_IMAGE}"
+
+# ============================================================
+# SYSTEMD SERVICE
+# ============================================================
+
+info "netboot.xyz systemd service maken"
+
+cat > "${SYSTEMD_SERVICE}" <<EOF
+[Unit]
+Description=FreeBoot netboot.xyz PXE/iPXE Server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+ExecStart=/usr/bin/podman run \\
+    --name netbootxyz \\
+    --rm \\
+    --net=host \\
+    -e TFTPD_OPTS=--tftp-single-port \\
+    -v ${NETBOOT_CONFIG}:/config:Z \\
+    -v ${NETBOOT_ASSETS}:/assets:Z \\
+    ${NETBOOT_IMAGE}
+
+ExecStop=/usr/bin/podman stop -t 10 netbootxyz
+
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+systemctl enable netbootxyz.service
+
+# ============================================================
+# DNSMASQ DHCP/PXE
+# ============================================================
+
+info "dnsmasq configureren"
+
+if [[ -f "${DNSMASQ_CONFIG}" ]]; then
+    cp "${DNSMASQ_CONFIG}" \
+       "${DNSMASQ_CONFIG}.backup.$(date +%Y%m%d-%H%M%S)"
+fi
+
+cat > "${DNSMASQ_CONFIG}" <<EOF
+# ============================================================
+# FreeBoot PXE DHCP
+# ============================================================
+
+# Alleen DHCP/PXE
 port=0
 
-enable-tftp
-tftp-root=/srv/tftp
+# Deployment interface
+interface=${INTERFACE}
+bind-interfaces
+
+# DHCP
+dhcp-range=${DHCP_START},${DHCP_END},255.255.255.0,${DHCP_LEASE}
+
+# Gateway
+dhcp-option=3,${GATEWAY}
+
+# DNS
+dhcp-option=6,${DNS1},${DNS2}
+
+# ============================================================
+# PXE architectuur
+# ============================================================
+
+# BIOS / Legacy
+dhcp-match=set:bios,option:client-arch,0
+dhcp-boot=tag:bios,netboot.xyz.kpxe
+
+# UEFI x86_64
+dhcp-match=set:efi64,option:client-arch,7
+dhcp-boot=tag:efi64,netboot.xyz.efi
+
+# UEFI x86_64
+dhcp-match=set:efi64old,option:client-arch,9
+dhcp-boot=tag:efi64old,netboot.xyz.efi
+
+# UEFI ARM64
+dhcp-match=set:efiarm64,option:client-arch,11
+dhcp-boot=tag:efiarm64,netboot.xyz-arm64.efi
 EOF
 
-ok "dnsmasq configuratie geschreven."
+# ============================================================
+# DNSMASQ TESTEN
+# ============================================================
 
-# ------------------------------------------------------------
-# dnsmasq configuratie testen
-# ------------------------------------------------------------
+info "dnsmasq configuratie testen"
 
-echo
-info "dnsmasq configuratie controleren..."
+dnsmasq --test
 
-if dnsmasq --test; then
-    ok "dnsmasq configuratie is geldig."
-else
-    error "dnsmasq configuratie bevat een fout."
-    exit 1
+# ============================================================
+# DNSMASQ STARTEN
+# ============================================================
+
+info "dnsmasq activeren"
+
+systemctl enable dnsmasq
+systemctl restart dnsmasq
+
+if ! systemctl is-active --quiet dnsmasq; then
+    error "dnsmasq is niet actief."
 fi
 
-# ------------------------------------------------------------
-# dnsmasq starten
-# ------------------------------------------------------------
+# ============================================================
+# NETBOOT.XYZ STARTEN
+# ============================================================
 
-echo
-info "dnsmasq starten..."
+info "netboot.xyz starten"
 
-if systemctl restart dnsmasq; then
-    ok "dnsmasq draait."
-else
-    error "dnsmasq kon niet starten."
+systemctl restart netbootxyz.service
+
+sleep 3
+
+if ! systemctl is-active --quiet netbootxyz.service; then
     echo
-    echo "Controleer met:"
-    echo
-    echo "sudo systemctl status dnsmasq --no-pager -l"
-    echo
-    echo "Het script stopt hier."
-    exit 1
+    systemctl status netbootxyz.service --no-pager
+    error "netboot.xyz is niet actief."
 fi
 
-systemctl enable dnsmasq >/dev/null
+# ============================================================
+# UFW
+# ============================================================
 
-# ------------------------------------------------------------
-# Debian PXE bestanden
-# ------------------------------------------------------------
+info "UFW-regels instellen"
+
+ufw allow 67/udp
+ufw allow 69/udp
+ufw allow 80/tcp
+ufw allow 3000/tcp
+ufw allow 9090/tcp
+
+# ============================================================
+# UFW STATUS
+# ============================================================
+
+info "UFW controleren"
+
+ufw status verbose
+
+# ============================================================
+# SERVICES
+# ============================================================
+
+info "Services controleren"
+
+echo
+echo "--- dnsmasq ---"
+systemctl status dnsmasq --no-pager | sed -n '1,15p'
+
+echo
+echo "--- netbootxyz ---"
+systemctl status netbootxyz.service --no-pager | sed -n '1,20p'
+
+# ============================================================
+# PODMAN
+# ============================================================
+
+info "Podman controleren"
+
+podman ps --filter name=netbootxyz
+
+# ============================================================
+# EINDSAMENVATTING
+# ============================================================
 
 echo
 echo "============================================================"
-echo "3. Debian 13 PXE-bestanden downloaden"
-echo "============================================================"
-
-rm -f "$TMP_FILE"
-
-curl \
-    --fail \
-    --location \
-    --show-error \
-    --progress-bar \
-    "$DEBIAN_URL" \
-    --output "$TMP_FILE"
-
-ok "Debian netboot.tar.gz gedownload."
-
-# ------------------------------------------------------------
-# Oude bestanden opruimen
-# ------------------------------------------------------------
-
-rm -rf "$TFTP_DIR"/*
-mkdir -p "$TFTP_DIR"
-
-# ------------------------------------------------------------
-# Uitpakken
-# ------------------------------------------------------------
-
-echo
-info "PXE-bestanden uitpakken..."
-
-tar -xzf "$TMP_FILE" -C "$TFTP_DIR"
-
-rm -f "$TMP_FILE"
-
-ok "PXE-bestanden uitgepakt."
-
-# ------------------------------------------------------------
-# Bestanden controleren
-# ------------------------------------------------------------
-
-echo
-echo "Belangrijke PXE-bestanden:"
-echo
-
-find "$TFTP_DIR" \
-    -type f \
-    \( \
-        -name "bootnetx64.efi" \
-        -o -name "grubx64.efi" \
-        -o -name "pxelinux.0" \
-        -o -name "linux" \
-        -o -name "initrd.gz" \
-    \) \
-    -print | sort
-
-# ------------------------------------------------------------
-# nginx
-# ------------------------------------------------------------
-
-echo
-echo "============================================================"
-echo "4. HTTP-server configureren"
-echo "============================================================"
-
-mkdir -p "$HTTP_DIR"
-
-cat > "$HTTP_DIR/index.html" <<'EOF'
-<!DOCTYPE html>
-<html lang="nl">
-<head>
-    <meta charset="UTF-8">
-    <title>FreeBoot Debian Netboot</title>
-</head>
-<body>
-    <h1>FreeBoot Debian 13 Netboot</h1>
-    <p>Netboot-server actief.</p>
-</body>
-</html>
-EOF
-
-systemctl enable nginx >/dev/null
-systemctl restart nginx
-
-ok "nginx draait."
-
-# ------------------------------------------------------------
-# HTTP controleren
-# ------------------------------------------------------------
-
-echo
-info "HTTP-server testen..."
-
-if curl --fail --silent http://127.0.0.1/debian/ >/dev/null; then
-    ok "HTTP werkt."
-else
-    error "HTTP-test mislukt."
-    exit 1
-fi
-
-# ------------------------------------------------------------
-# TFTP controleren
-# ------------------------------------------------------------
-
-echo
-echo "============================================================"
-echo "5. TFTP controleren"
-echo "============================================================"
-
-if [ -d "$TFTP_DIR/debian-installer" ]; then
-    ok "Debian installer aanwezig."
-else
-    error "Debian installer ontbreekt."
-    exit 1
-fi
-
-# ------------------------------------------------------------
-# Services
-# ------------------------------------------------------------
-
-echo
-echo "============================================================"
-echo "6. Services"
-echo "============================================================"
-
-systemctl --no-pager --full status dnsmasq | sed -n '1,8p'
-echo
-systemctl --no-pager --full status nginx | sed -n '1,8p'
-
-# ------------------------------------------------------------
-# Eindcontrole
-# ------------------------------------------------------------
-
-echo
-echo "============================================================"
-echo " NETBOOT SERVER KLAAR"
+echo " FreeBoot Deployment / PXE Server"
+echo " configuratie voltooid"
 echo "============================================================"
 echo
-
-echo "TFTP:"
-echo "  $TFTP_DIR"
+echo "Server:"
+echo "  ${SERVER_IP}/${CIDR}"
 echo
-
-echo "HTTP:"
-echo "  http://<server-ip>/debian/"
+echo "Gateway:"
+echo "  ${GATEWAY}"
 echo
-
 echo "DHCP:"
-echo "  NIET actief op deze server"
+echo "  ${DHCP_START} - ${DHCP_END}"
 echo
-
-echo "PXE:"
-echo "  UEFI : Debian netboot UEFI bestanden aanwezig"
-echo "  BIOS : Debian netboot BIOS bestanden aanwezig"
+echo "Lease:"
+echo "  ${DHCP_LEASE}"
 echo
-
-echo "Huidige netwerk:"
-ip -br addr
-
+echo "DNS:"
+echo "  ${DNS1}"
+echo "  ${DNS2}"
+echo
+echo "Netboot.xyz:"
+echo "  http://${SERVER_IP}:3000"
+echo
+echo "PXE HTTP:"
+echo "  http://${SERVER_IP}/"
+echo
+echo "Cockpit:"
+echo "  https://${SERVER_IP}:9090"
+echo
+echo "UFW:"
+echo "  UDP 67"
+echo "  UDP 69"
+echo "  TCP 80"
+echo "  TCP 3000"
+echo "  TCP 9090"
 echo
 echo "============================================================"
-echo "VOLGENDE STAP"
+echo " BELANGRIJK"
 echo "============================================================"
 echo
-echo "1. Deze server blijft voorlopig op het productienetwerk."
-echo "2. PXE/DHCP wordt nog NIET gebruikt."
-echo "3. Configureer later een apart netboot-netwerk op OPNsense."
-echo "4. Laat OPNsense DHCP verzorgen."
-echo "5. Verplaats daarna deze server naar het netboot-netwerk."
-echo "6. Test vervolgens met één PXE-client."
+echo "Dit script heeft de IP-stack NIET gewijzigd."
 echo
-echo "Installatie succesvol afgerond."
+echo "Nu:"
 echo
+echo "  1. Server uitschakelen"
+echo "  2. Kabel naar deploymentnetwerk"
+echo "  3. Server starten"
+echo "  4. Controleren op 10.90.90.10"
+echo
+echo "Deploymentnetwerk:"
+echo "  10.90.90.0/24"
+echo
+echo "Server:"
+echo "  10.90.90.10"
+echo
+echo "============================================================"
