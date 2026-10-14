@@ -1,104 +1,169 @@
 #!/usr/bin/env bash
 # =============================================================================
-#  NETBOOT STACK INSTALLER VOOR OPENSUSE LEAP  (v3.7)
+#  NETBOOT STACK INSTALLER VOOR OPENSUSE LEAP
 # =============================================================================
 #
-#  @bestand   netboot-stack-installer.sh
-#  @versie    3.7.0
-#  @datum     2026-10-14       (statisch; commentaar wordt NIET uitgevoerd)
-#  @doel      Installeert een complete netboot-stack op een schone openSUSE
-#             Leap-server met behoud van de bestaande Fritzbox-DHCP.
+#  WAT DIT SCRIPT DOET
+#  -------------------
+#  Dit script installeert en configureert een complete netboot-omgeving op
+#  een openSUSE Leap-server, zonder de bestaande DHCP-server (meestal een
+#  Fritzbox) te vervangen. Na een succesvolle uitvoering kunnen BIOS- en
+#  UEFI-clients in hetzelfde L2-segment via PXE booten en netboot.xyz
+#  gebruiken om besturingssystemen te installeren of te starten.
+#
+#  Het script installeert de volgende componenten:
+#
+#    1. dnsmasq          - Proxy-DHCP: antwoordt uitsluitend op PXE-verzoeken,
+#                          geeft zelf geen IP-adressen uit.
+#    2. netboot.xyz      - TFTP- en HTTP-bootserver in een Podman-container
+#                          (host-netwerk), inclusief web-UI.
+#    3. DokuWiki         - Documentatie-wiki in een Podman-container.
+#    4. Forgejo          - Git-forge (Git-hosting, issue-tracking) in een
+#                          Podman-container.
+#    5. Cockpit          - Grafisch beheer-dashboard op de host, met
+#                          Podman-integratie voor het beheren van containers.
+#
+#  Alle containers worden beheerd via Quadlet: systemd leest declaratieve
+#  .container-bestanden uit /etc/containers/systemd/ en genereert daaruit
+#  services. Containers starten automatisch bij het opstarten van de server
+#  en zijn te beheren via systemctl of Cockpit.
 #
 # -----------------------------------------------------------------------------
-#  GETEST OP
+#  ARCHITECTUUR
 # -----------------------------------------------------------------------------
-#   * openSUSE Leap 15.5   (schone installatie, BIOS-client)
-#   * openSUSE Leap 15.6   (schone installatie, BIOS- en UEFI-client)
 #
-#  NIET GETEST OP (gebruik op eigen risico):
-#   * openSUSE Tumbleweed, MicroOS, SLES 15.x, Leap 15.4 en ouder
-#
-# -----------------------------------------------------------------------------
-#  EXIT-CODES
-# -----------------------------------------------------------------------------
-#   0   = volledig geslaagd
-#   1   = fatale fout TIJDENS installatie; rollback is uitgevoerd
-#   2   = installatie technisch voltooid, maar eindcontrole mislukt;
-#         GEEN rollback uitgevoerd (om onderzoek mogelijk te maken)
-#   130 = onderbroken door gebruiker (rollback is uitgevoerd)
-#
-# -----------------------------------------------------------------------------
-#  GEDRAG BIJ MISLUKTE EINDCONTROLE
-# -----------------------------------------------------------------------------
-#  Als verify_installation() faalt, kiest dit script er BEWUST voor om
-#  GEEN rollback uit te voeren. Reden: een falende eindcontrole betekent
-#  dat de installatie zelf is gelukt, maar dat een runtime-conditie niet
-#  wordt gehaald (bijv. container nog niet klaar, tijdelijke netwerkstoring).
-#  Door niets terug te draaien kun je de situatie live onderzoeken:
-#
-#      systemctl status <service>
-#      journalctl -u <service> -n 50 --no-pager
-#      podman logs <container>
-#
-#  Wil je alsnog handmatig terugrollen, dan kan dat door de relevante
-#  containers te stoppen en de .bak.<tijdstempel>-bestanden terug te zetten.
-#  Zie print_summary_failure() voor een overzicht van de aangeraakte
-#  componenten.
+#   ┌─────────────────────────────────────────────────────────────────┐
+#   │  Bestaande DHCP-server (bijv. Fritzbox)                         │
+#   │  - Deelt IP-adressen uit aan alle apparaten                     │
+#   │  - Ondersteunt geen PXE-opties (next-server, boot-filename)     │
+#   └──────────────────┬──────────────────────────────────────────────┘
+#                      │
+#                      │  bestaand L2-netwerk
+#                      │
+#   ┌──────────────────▼──────────────────────────────────────────────┐
+#   │  openSUSE Leap-server (dit script)                              │
+#   │                                                                 │
+#   │  dnsmasq (host-service)                                         │
+#   │   - Luistert passief mee op DHCP-broadcasts                     │
+#   │   - Antwoordt alleen op PXE-verzoeken                           │
+#   │   - Geeft geen IP-adressen uit                                  │
+#   │   - Verwijst clients naar de netboot.xyz-container              │
+#   │                                                                 │
+#   │  netboot.xyz (Podman, host-network)                             │
+#   │   - TFTP-server op :69/UDP                                      │
+#   │   - HTTP-server op :80/TCP                                      │
+#   │   - Web-UI op :9000/TCP                                         │
+#   │                                                                 │
+#   │  DokuWiki (Podman)                :9001/TCP                     │
+#   │  Forgejo  (Podman)                :9002/TCP + :2002/TCP (SSH)   │
+#   │  Cockpit  (host-service)          :9003/TCP                     │
+#   └─────────────────────────────────────────────────────────────────┘
 #
 # -----------------------------------------------------------------------------
-#  BESCHERMING VAN BESTAANDE DATA
+#  WAAROM DEZE OPZET
 # -----------------------------------------------------------------------------
-#  create_directories() gebruikt ensure_ownership() in plaats van een
-#  onvoorwaardelijke `chown -R`. Er wordt onderscheid gemaakt tussen:
-#    * map bestaat niet         → aanmaken, eigenaar instellen
-#    * map bestaat en is leeg   → recursief chownen (veilig)
-#    * map bestaat met inhoud   → alleen top-level chownen; de gebruiker
-#                                 wordt gewaarschuwd dat recursief chownen
-#                                 handmatig moet gebeuren indien nodig
-#  De oorspronkelijke eigenaar wordt vastgelegd in de rollback-stack.
+#
+#  Proxy-DHCP in plaats van een tweede DHCP-server.
+#    Een tweede DHCP-server op hetzelfde L2-segment veroorzaakt
+#    IP-conflicten en is een klassieke netwerkfout. dnsmasq in proxy-modus
+#    antwoordt uitsluitend op PXE-verzoeken; de bestaande DHCP-server
+#    blijft verantwoordelijk voor IP-uitgifte.
+#
+#  dnsmasq doet geen TFTP.
+#    De netboot.xyz-container bevat een eigen TFTP-server op :69/UDP.
+#    Twee TFTP-servers op dezelfde poort conflicteren, dus dnsmasq
+#    beperkt zich tot proxy-DHCP.
+#
+#  netboot.xyz draait met host-netwerk.
+#    TFTP gebruikt UDP met dynamische poorten en werkt niet betrouwbaar
+#    via bridge-netwerken. Host-netwerk is de enige werkende optie.
+#
+#  Quadlet in plaats van `podman generate systemd`.
+#    Declaratief, systemd-native, volledig integreerbaar met Cockpit.
+#
+#  Expliciet server-IP in de pxe-service-regel.
+#    De Fritzbox geeft soms zijn eigen IP-adres als TFTP-server door aan
+#    PXE-clients. Door het server-IP expliciet op te nemen, wordt dit
+#    omzeild.
 #
 # -----------------------------------------------------------------------------
-#  HERHAALBAARHEID EN ROLLBACK
+#  GEDRAG VAN HET SCRIPT
 # -----------------------------------------------------------------------------
-#   * Bestaande configuraties krijgen een tijdgestempelde back-up.
-#   * Rollback-acties zijn getypeerd: restore_file, remove_path,
-#     restore_service, restore_owner, reload_firewall, daemon_reload.
-#     Geen eval; elke actie is een expliciete case-tak.
-#   * Service-state wordt vastgelegd VÓÓR wijziging; rollback herstelt
-#     uitsluitend wijzigingen die deze run zelf heeft aangebracht.
-#   * Fatale fouten tijdens installatie gaan via die() → rollback is
-#     gegarandeerd. Een mislukte eindcontrole gaat NIET via die().
 #
-# -----------------------------------------------------------------------------
-#  WAT DIT SCRIPT INSTALLEERT
-# -----------------------------------------------------------------------------
-#   1. dnsmasq          - Proxy-DHCP (GEEN IP-uitgifte, GEEN TFTP)
-#   2. netboot.xyz      - TFTP + HTTP boot-server (Podman, host-network)
-#   3. DokuWiki         - Documentatie-wiki (Podman)
-#   4. Forgejo          - Git-forge (Podman)
-#   5. Cockpit          - Beheer-dashboard (host service, poort 9003)
+#  Veilig herhaalbaar
+#  ------------------
+#  Het script kan meerdere keren worden uitgevoerd. Bestaande
+#  configuratiebestanden krijgen een tijdgestempelde back-up
+#  (.bak.YYYYMMDD-HHMMSS) voordat ze worden overschreven. Een tweede run
+#  overschrijft dus nooit stilzwijgend een eerdere configuratie.
 #
-# -----------------------------------------------------------------------------
-#  ONTWERPBESLISSINGEN
-# -----------------------------------------------------------------------------
-#   1. Proxy-DHCP: dnsmasq geeft GEEN IP's uit; Fritzbox blijft enige DHCP.
-#   2. dnsmasq doet GEEN TFTP — dat doet de netboot.xyz container.
-#   3. netboot.xyz draait met Network=host.
-#   4. Quadlet in plaats van `podman generate systemd`.
-#   5. Expliciet server-IP in pxe-service (workaround Fritzbox).
-#   6. Netwerkberekening: ipcalc primair (correcte extractie), pure bash
-#      als fallback. ipcalc is geen harde prerequisite.
-#   7. Interfacekeuze expliciet; geen aanname op basis van default route.
-#   8. firewalld geactiveerd; interface MOET expliciete zone hebben.
-#   9. Rollback via getypeerde dispatcher; geen eval.
-#  10. Container-images vastgezet op expliciete versietags.
-#  11. Exit-status is beslissend; onderscheid tussen fout tijdens
-#      installatie (exit 1 + rollback) en mislukte eindcontrole (exit 2).
-#  12. dnsmasq configuratie op vier niveaus geverifieerd.
-#  13. Containers krijgen een wachttijd van 90s vóór het eindoordeel.
-#  14. Eindcontrole omvat TFTP-bestandstest én HTTP-body-test.
-#  15. Cockpit draait zonder aanname van een reverse proxy.
-#  16. Bestaande data wordt niet onbedoeld van eigenaar veranderd.
+#  Bestaande data wordt beschermd
+#  ------------------------------
+#  Bij het instellen van eigenaars op de data-mappen van DokuWiki en
+#  Forgejo wordt onderscheid gemaakt tussen:
+#     * map bestaat niet       → aangemaakt, eigenaar ingesteld
+#     * map bestaat en is leeg → recursief eigenaar ingesteld (veilig)
+#     * map bestaat met inhoud → alleen top-level eigenaar aangepast;
+#                                de gebruiker wordt gewaarschuwd dat
+#                                recursieve aanpassing handmatig moet
+#                                gebeuren indien nodig
+#
+#  Rollback bij fouten tijdens installatie
+#  ---------------------------------------
+#  Alle wijzigingen tijdens de installatie worden vastgelegd in een
+#  rollback-stack. Bij een fatale fout wordt de stack in omgekeerde
+#  volgorde uitgevoerd: bestanden worden teruggezet, mappen verwijderd,
+#  services in hun oorspronkelijke staat hersteld en firewall-regels
+#  teruggedraaid. Rollback-acties zijn getypeerd (geen eval), zodat
+#  onverwachte shell-interpretatie onmogelijk is.
+#
+#  Service-state wordt gerespecteerd
+#  ---------------------------------
+#  Voordat het script een service aanraakt, wordt vastgelegd of die
+#  daarvoor al enabled en/of actief was. Bij rollback worden alleen de
+#  wijzigingen teruggedraaid die deze run zelf heeft aangebracht. Een
+#  service die vóór de installatie al draaide, wordt niet uitgeschakeld.
+#
+#  Onderscheid tussen fouten tijdens installatie en mislukte eindcontrole
+#  ----------------------------------------------------------------------
+#  Het script maakt expliciet onderscheid tussen twee soorten falen:
+#
+#    Fatale fout tijdens installatie
+#      Het script stopt onmiddellijk, voert rollback uit en eindigt met
+#      exit-code 1. Dit gebeurt bijvoorbeeld wanneer een package niet
+#      kan worden geïnstalleerd, een container niet start of een
+#      configuratie ongeldig blijkt.
+#
+#    Mislukte eindcontrole
+#      De installatie is technisch voltooid, maar een runtime-conditie
+#      wordt niet gehaald (bijvoorbeeld een container die nog niet klaar
+#      is, of een tijdelijke netwerkstoring). Het script voert dan GEEN
+#      rollback uit, zodat de beheerder de situatie live kan onderzoeken,
+#      en eindigt met exit-code 2. De installatie blijft staan; een
+#      herstart van de betreffende service is meestal voldoende.
+#
+#  Exit-codes
+#  ----------
+#    0   = volledig geslaagd
+#    1   = fatale fout tijdens installatie; rollback uitgevoerd
+#    2   = installatie voltooid, eindcontrole mislukt; geen rollback
+#    130 = onderbroken door gebruiker; rollback uitgevoerd
+#
+#  Eindcontrole
+#  ------------
+#  Na de installatie controleert het script:
+#    * of alle services (dnsmasq, cockpit.socket, firewalld) actief zijn
+#    * of alle containers (netbootxyz, dokuwiki, forgejo) actief zijn
+#    * of de dnsmasq-configuratie syntactisch geldig is
+#    * of poort 69/UDP (TFTP) en poort 80/TCP (HTTP) luisteren
+#    * of de HTTP-root een niet-lege body teruggeeft
+#    * of de bestanden netboot.xyz.kpxe en netboot.xyz.efi via TFTP
+#      kunnen worden opgehaald
+#
+#  Een succesvolle eindcontrole bewijst dat de server klaar is voor
+#  PXE-clients. Het bewijst niet dat een specifieke client de volledige
+#  bootprocedure kan doorlopen — dat blijft een handmatige test met een
+#  echte BIOS- en UEFI-client.
 #
 # -----------------------------------------------------------------------------
 #  VEREISTEN
@@ -107,79 +172,94 @@
 #   * Root-toegang
 #   * Minimaal 2 GB RAM, 20 GB vrije schijfruimte
 #   * Internettoegang voor packages en container-images
-#   * Server in hetzelfde L2-segment als de PXE-clients
-#   * De gekozen interface MOET een expliciete firewalld-zone hebben
+#   * De server moet in hetzelfde L2-segment staan als de PXE-clients
+#   * De gekozen netwerkinterface moet een expliciete firewalld-zone hebben
 #
 # -----------------------------------------------------------------------------
-#  POORTENOVERZICHT
+#  POORTEN
 # -----------------------------------------------------------------------------
-#   67/UDP   dnsmasq       Proxy-DHCP             (PXE-kritiek)
-#   69/UDP   netboot.xyz   TFTP                   (PXE-kritiek)
-#   80/TCP   netboot.xyz   HTTP (iPXE)            (PXE-kritiek)
-#   4011/UDP dnsmasq       Alternatieve PXE       (PXE-kritiek)
-#   2002/TCP Forgejo       Git SSH                (beheer)
-#   9000/TCP netboot.xyz   Web UI                 (beheer)
-#   9001/TCP DokuWiki      Webinterface           (beheer)
-#   9002/TCP Forgejo       HTTP                   (beheer)
-#   9003/TCP Cockpit       Dashboard              (beheer)
+#    67/UDP   dnsmasq       Proxy-DHCP
+#    69/UDP   netboot.xyz   TFTP
+#    80/TCP   netboot.xyz   HTTP (iPXE)
+#    4011/UDP dnsmasq       Alternatieve PXE-poort
+#
+#    2002/TCP Forgejo       Git SSH
+#    9000/TCP netboot.xyz   Web-UI
+#    9001/TCP DokuWiki      Webinterface
+#    9002/TCP Forgejo       HTTP
+#    9003/TCP Cockpit       Dashboard
+#
+#  De PXE-poorten zijn noodzakelijk voor het functioneren van de
+#  netboot-omgeving. De beheer-poorten worden op dezelfde interface
+#  geopend; overweeg of dat in jouw omgeving wenselijk is.
 #
 # -----------------------------------------------------------------------------
 #  GEBRUIK
 # -----------------------------------------------------------------------------
 #   sudo ./netboot-stack-installer.sh
 #
+#  Het script is interactief: het toont de beschikbare netwerkinterfaces
+#  en vraagt de gebruiker welke interface op het PXE-netwerk is
+#  aangesloten. Daarna toont het de berekende netwerkgegevens en vraagt
+#  om bevestiging voordat de installatie begint.
+#
 # -----------------------------------------------------------------------------
-#  CONTAINER-IMAGES (VASTGEZET)
+#  CONTAINER-IMAGES
 # -----------------------------------------------------------------------------
-#   skopeo list-tags docker://ghcr.io/netbootxyz/netbootxyz
-#   skopeo list-tags docker://docker.io/dokuwiki/dokuwiki
-#   skopeo list-tags docker://codeberg.org/forgejo/forgejo
+#  De gebruikte images zijn vastgezet op expliciete versietags, zodat
+#  installaties reproduceerbaar zijn. Om beschikbare tags te bekijken:
+#
+#     skopeo list-tags docker://ghcr.io/netbootxyz/netbootxyz
+#     skopeo list-tags docker://docker.io/dokuwiki/dokuwiki
+#     skopeo list-tags docker://codeberg.org/forgejo/forgejo
+#
+#  Voordat het script de containers aanmaakt, controleert het of alle
+#  tags bestaan. Als een tag niet wordt gevonden, stopt het script met
+#  een duidelijke melding — er wordt geen poging gedaan om een andere
+#  versie te gebruiken.
 #
 # -----------------------------------------------------------------------------
 #  NA INSTALLATIE
 # -----------------------------------------------------------------------------
-#   1. Zet het server-IP vast in de Fritzbox (DHCP-reservering).
-#   2. Test TFTP:  tftp <server-ip> -c get netboot.xyz.kpxe /tmp/test.kpxe
-#   3. Test PXE-boot vanaf een BIOS-client én een UEFI-client.
-#   4. Beheer:     https://<server-ip>:9003
+#   1. Zet het server-IP vast in de bestaande DHCP-server (bijv. Fritzbox:
+#      "Diesem Netzwerkgerät immer die gleiche IPv4-Adresse zuweisen").
+#      Zonder DHCP-reservering kan het IP veranderen na een reboot.
+#   2. Test TFTP lokaal:
+#         tftp <server-ip> -c get netboot.xyz.kpxe /tmp/test.kpxe
+#   3. Test een PXE-boot vanaf een BIOS-client.
+#   4. Test een PXE-boot vanaf een UEFI-client.
+#   5. Beheer de containers via Cockpit: https://<server-ip>:9003
 #
 # -----------------------------------------------------------------------------
 #  TROUBLESHOOTING
 # -----------------------------------------------------------------------------
-#   "TFTP timeout"       → ss -ulnp | grep :69 ; podman logs netbootxyz
-#   "no boot filename"   → journalctl -u dnsmasq -f
-#   Client boot van Fritzbox-IP → pxe-service regel eindigt met ,$SERVER_IP
-#   Container start niet → systemctl status <naam> ; podman logs <naam>
-#   Zone ontbreekt       → firewall-cmd --permanent --zone=public \
-#                            --add-interface=<iface> && firewall-cmd --reload
 #
-# -----------------------------------------------------------------------------
-#  CHANGELOG
-# -----------------------------------------------------------------------------
-#  3.7.0 - Deze versie:
-#          * ensure_ownership(): bestaande data wordt niet onbedoeld
-#            gewijzigd. Alleen top-level chown als de map al inhoud heeft;
-#            recursief chownen alleen voor nieuwe/lege mappen. Nieuwe
-#            rollback-actie restore_owner (punt 1).
-#          * Gedrag bij mislukte eindcontrole is expliciet: exit-code 2,
-#            GEEN rollback, met duidelijke uitleg in header en in
-#            print_summary_failure() (punt 2).
-#  3.6.0 - ipcalc-extractie gecorrigeerd met fallback; rollback zonder
-#          eval via getypeerde dispatcher; service-state vastgelegd;
-#          TFTP-bestandstest en HTTP-body-test in eindcontrole.
-#  3.5.0 - Pure-bash netwerkberekening; firewall-XML herstel;
-#          SERVICE_STATE; die() forceert rollback; vier dnsmasq-checks;
-#          zone verplicht.
-#  3.4.0 - Tijdgestempelde back-ups; ProtocolHeader verwijderd;
-#          interfacekeuze via ip link show; dnsmasq include geverifieerd;
-#          containers START_FAILED-flag; firewall via firewall-cmd --state.
-#  3.3.0 - Interfacekeuze expliciet; firewalld verplicht; eindcontrole
-#          beslissend; documentatie "Getest op".
-#  3.2.0 - Prerequisites vóór alle stappen; wachttijd containers;
-#          image-tags gepind + remote verificatie.
-#  3.1.0 - Verificatie, image-pinning, documentatie bijgewerkt.
-#  3.0.0 - Herschrijving: interfacekeuze, firewall zones, rollback, traps.
-#  2.0.0 - Initiële versie (niet in productie gebruiken).
+#  "TFTP timeout" op de client
+#       ss -ulnp | grep :69          (container moet luisteren)
+#       podman logs netbootxyz       (container-logs)
+#       firewall-cmd --list-all      (firewall-regels)
+#
+#  "no boot filename" op de client
+#       journalctl -u dnsmasq -f     (proxy-DHCP antwoordt niet)
+#       Controleer interface= in /etc/dnsmasq.d/netboot.conf
+#
+#  Client probeert te booten van het IP van de DHCP-server
+#       Controleer of de pxe-service-regel in /etc/dnsmasq.d/netboot.conf
+#       eindigt met ,$SERVER_IP
+#
+#  Container start niet
+#       systemctl status <naam>.service
+#       podman logs <naam>
+#       ss -tlnp                     (poortconflict?)
+#
+#  firewalld start niet of zone ontbreekt
+#       systemctl status firewalld
+#       firewall-cmd --get-zone-of-interface=<iface>
+#       firewall-cmd --permanent --zone=public --add-interface=<iface>
+#       firewall-cmd --reload
+#
+#  IP-adres van de server verandert na reboot
+#       Stel een DHCP-reservering in op de bestaande DHCP-server.
 #
 # =============================================================================
 
@@ -191,7 +271,7 @@ IFS=$'\n\t'
 # =============================================================================
 
 readonly SCRIPT_NAME="$(basename "$0")"
-readonly SCRIPT_VERSION="3.7.0"
+readonly SCRIPT_VERSION="4.0.0"
 readonly LOG_FILE="/var/log/netboot-stack-install.log"
 readonly QUADLET_DIR="/etc/containers/systemd"
 readonly DNSMASQ_CONF_DIR="/etc/dnsmasq.d"
@@ -610,13 +690,6 @@ EOF
 # =============================================================================
 #  STAP 5 — MAPPEN (data-bescherming)
 # =============================================================================
-#
-# ensure_ownership() onderscheidt drie gevallen:
-#   1. Map bestaat niet          → aanmaken + eigenaar instellen
-#   2. Map bestaat en is leeg    → recursief chownen (veilig)
-#   3. Map bestaat met inhoud    → alleen top-level chown, met waarschuwing
-#
-# In alle gevallen wordt de oorspronkelijke eigenaar vastgelegd voor rollback.
 
 ensure_ownership() {
     local path="$1" uid="$2" gid="$3"
@@ -695,7 +768,7 @@ configure_dnsmasq() {
 
     cat > "$DNSMASQ_CONF" <<EOF
 # =============================================================================
-# Proxy-DHCP voor netboot.xyz  (gegenereerd door ${SCRIPT_NAME} v${SCRIPT_VERSION})
+# Proxy-DHCP voor netboot.xyz  (gegenereerd door ${SCRIPT_NAME})
 # =============================================================================
 interface=${SELECTED_IFACE}
 bind-dynamic
@@ -772,13 +845,10 @@ configure_firewall() {
         info "  Back-up zone-XML: $backup"
     fi
 
-    # PXE-kritieke poorten
     firewall-cmd --permanent --zone="$zone" --add-service=dhcp >/dev/null
     firewall-cmd --permanent --zone="$zone" --add-service=tftp >/dev/null
     firewall-cmd --permanent --zone="$zone" --add-port=4011/udp >/dev/null
     firewall-cmd --permanent --zone="$zone" --add-port="${NETBOOT_HTTP_PORT}/tcp" >/dev/null
-
-    # Beheer-poorten
     firewall-cmd --permanent --zone="$zone" --add-port="${NETBOOT_WEB_PORT}/tcp"  >/dev/null
     firewall-cmd --permanent --zone="$zone" --add-port="${DOKUWIKI_PORT}/tcp"     >/dev/null
     firewall-cmd --permanent --zone="$zone" --add-port="${FORGEJO_HTTP_PORT}/tcp" >/dev/null
@@ -923,15 +993,10 @@ start_containers() {
 #  STAP 10 — EINDCONTROLES
 # =============================================================================
 #
-# BELANGRIJK: een falende eindcontrole leidt NIET tot rollback. Reden:
-# de installatie is technisch voltooid; het falen is een runtime-conditie
-# die vaak tijdelijk is (container nog aan het initialiseren, DNS nog niet
-# verspreid, etc.). Door niets terug te draaien kan de beheerder de situatie
-# live onderzoeken en zo nodig een container herstarten zonder alles
-# opnieuw te installeren.
-#
-# Het onderscheid met fatale fouten tijdens de installatie is zichtbaar in
-# de exit-code: 1 (met rollback) vs 2 (zonder rollback).
+# Een falende eindcontrole leidt NIET tot rollback. De installatie is
+# technisch voltooid; het falen is een runtime-conditie die vaak tijdelijk
+# is. De beheerder kan de situatie live onderzoeken en zo nodig een
+# service herstarten zonder alles opnieuw te installeren.
 
 verify_installation() {
     info "[8/9] Eindcontroles uitvoeren..."
