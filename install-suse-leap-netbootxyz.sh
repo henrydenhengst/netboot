@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # =============================================================================
-#  NETBOOT STACK INSTALLER VOOR OPENSUSE LEAP  (v3.6)
+#  NETBOOT STACK INSTALLER VOOR OPENSUSE LEAP  (v3.7)
 # =============================================================================
 #
 #  @bestand   netboot-stack-installer.sh
-#  @versie    3.6.0
+#  @versie    3.7.0
 #  @datum     2026-10-14       (statisch; commentaar wordt NIET uitgevoerd)
 #  @doel      Installeert een complete netboot-stack op een schone openSUSE
 #             Leap-server met behoud van de bestaande Fritzbox-DHCP.
@@ -18,21 +18,56 @@
 #  NIET GETEST OP (gebruik op eigen risico):
 #   * openSUSE Tumbleweed, MicroOS, SLES 15.x, Leap 15.4 en ouder
 #
-#  Laatste praktijktest: zie changelog. Voer dit script ALTIJD eerst uit op
-#  een schone testinstallatie en valideer met een echte BIOS- én UEFI-client
-#  voordat je het op productie loslaat.
+# -----------------------------------------------------------------------------
+#  EXIT-CODES
+# -----------------------------------------------------------------------------
+#   0   = volledig geslaagd
+#   1   = fatale fout TIJDENS installatie; rollback is uitgevoerd
+#   2   = installatie technisch voltooid, maar eindcontrole mislukt;
+#         GEEN rollback uitgevoerd (om onderzoek mogelijk te maken)
+#   130 = onderbroken door gebruiker (rollback is uitgevoerd)
+#
+# -----------------------------------------------------------------------------
+#  GEDRAG BIJ MISLUKTE EINDCONTROLE
+# -----------------------------------------------------------------------------
+#  Als verify_installation() faalt, kiest dit script er BEWUST voor om
+#  GEEN rollback uit te voeren. Reden: een falende eindcontrole betekent
+#  dat de installatie zelf is gelukt, maar dat een runtime-conditie niet
+#  wordt gehaald (bijv. container nog niet klaar, tijdelijke netwerkstoring).
+#  Door niets terug te draaien kun je de situatie live onderzoeken:
+#
+#      systemctl status <service>
+#      journalctl -u <service> -n 50 --no-pager
+#      podman logs <container>
+#
+#  Wil je alsnog handmatig terugrollen, dan kan dat door de relevante
+#  containers te stoppen en de .bak.<tijdstempel>-bestanden terug te zetten.
+#  Zie print_summary_failure() voor een overzicht van de aangeraakte
+#  componenten.
+#
+# -----------------------------------------------------------------------------
+#  BESCHERMING VAN BESTAANDE DATA
+# -----------------------------------------------------------------------------
+#  create_directories() gebruikt ensure_ownership() in plaats van een
+#  onvoorwaardelijke `chown -R`. Er wordt onderscheid gemaakt tussen:
+#    * map bestaat niet         → aanmaken, eigenaar instellen
+#    * map bestaat en is leeg   → recursief chownen (veilig)
+#    * map bestaat met inhoud   → alleen top-level chownen; de gebruiker
+#                                 wordt gewaarschuwd dat recursief chownen
+#                                 handmatig moet gebeuren indien nodig
+#  De oorspronkelijke eigenaar wordt vastgelegd in de rollback-stack.
 #
 # -----------------------------------------------------------------------------
 #  HERHAALBAARHEID EN ROLLBACK
 # -----------------------------------------------------------------------------
 #   * Bestaande configuraties krijgen een tijdgestempelde back-up.
-#   * Rollback-acties zijn getypeerd (restore_file, remove_path,
-#     restore_service, reload_firewall, daemon_reload) en worden via een
-#     case-dispatcher uitgevoerd — geen eval, geen shell-injectie.
-#   * Service-state (enabled/active) wordt vastgelegd VÓÓR wijziging.
-#     Rollback herstelt uitsluitend wijzigingen die deze run zelf heeft
-#     aangebracht; al draaiende services worden niet uitgeschakeld.
-#   * Fatale fouten gaan via die() → rollback is gegarandeerd.
+#   * Rollback-acties zijn getypeerd: restore_file, remove_path,
+#     restore_service, restore_owner, reload_firewall, daemon_reload.
+#     Geen eval; elke actie is een expliciete case-tak.
+#   * Service-state wordt vastgelegd VÓÓR wijziging; rollback herstelt
+#     uitsluitend wijzigingen die deze run zelf heeft aangebracht.
+#   * Fatale fouten tijdens installatie gaan via die() → rollback is
+#     gegarandeerd. Een mislukte eindcontrole gaat NIET via die().
 #
 # -----------------------------------------------------------------------------
 #  WAT DIT SCRIPT INSTALLEERT
@@ -51,17 +86,19 @@
 #   3. netboot.xyz draait met Network=host.
 #   4. Quadlet in plaats van `podman generate systemd`.
 #   5. Expliciet server-IP in pxe-service (workaround Fritzbox).
-#   6. Netwerkberekening: ipcalc als primair (met correcte awk-extractie),
-#      pure bash als fallback. ipcalc is geen harde prerequisite.
+#   6. Netwerkberekening: ipcalc primair (correcte extractie), pure bash
+#      als fallback. ipcalc is geen harde prerequisite.
 #   7. Interfacekeuze expliciet; geen aanname op basis van default route.
-#   8. firewalld geactiveerd; interface MOET een expliciete zone hebben.
-#   9. Rollback via getypeerde dispatcher; service-state hersteld.
+#   8. firewalld geactiveerd; interface MOET expliciete zone hebben.
+#   9. Rollback via getypeerde dispatcher; geen eval.
 #  10. Container-images vastgezet op expliciete versietags.
-#  11. Exit-status is beslissend: exit 0 (succes) of exit 1 (fout).
+#  11. Exit-status is beslissend; onderscheid tussen fout tijdens
+#      installatie (exit 1 + rollback) en mislukte eindcontrole (exit 2).
 #  12. dnsmasq configuratie op vier niveaus geverifieerd.
 #  13. Containers krijgen een wachttijd van 90s vóór het eindoordeel.
 #  14. Eindcontrole omvat TFTP-bestandstest én HTTP-body-test.
 #  15. Cockpit draait zonder aanname van een reverse proxy.
+#  16. Bestaande data wordt niet onbedoeld van eigenaar veranderd.
 #
 # -----------------------------------------------------------------------------
 #  VEREISTEN
@@ -91,17 +128,12 @@
 # -----------------------------------------------------------------------------
 #   sudo ./netboot-stack-installer.sh
 #
-#  Exit-code:  0   = volledig geslaagd
-#              1   = niet (volledig) geslaagd — zie log
-#              130 = onderbroken door gebruiker
-#
 # -----------------------------------------------------------------------------
 #  CONTAINER-IMAGES (VASTGEZET)
 # -----------------------------------------------------------------------------
-#  Pas de tags aan naar de actuele stabiele versie vóór productiegebruik.
-#    skopeo list-tags docker://ghcr.io/netbootxyz/netbootxyz
-#    skopeo list-tags docker://docker.io/dokuwiki/dokuwiki
-#    skopeo list-tags docker://codeberg.org/forgejo/forgejo
+#   skopeo list-tags docker://ghcr.io/netbootxyz/netbootxyz
+#   skopeo list-tags docker://docker.io/dokuwiki/dokuwiki
+#   skopeo list-tags docker://codeberg.org/forgejo/forgejo
 #
 # -----------------------------------------------------------------------------
 #  NA INSTALLATIE
@@ -124,17 +156,20 @@
 # -----------------------------------------------------------------------------
 #  CHANGELOG
 # -----------------------------------------------------------------------------
-#  3.6.0 - Deze versie:
-#          * validate_interface(): ipcalc-extractie gecorrigeerd naar
-#            `awk '/^Netmask:/ {print $2}'` en `awk '/^Network:/ ...'`,
-#            met pure-bash als fallback (punt 1).
-#          * Rollback: dispatcher met getypeerde acties; geen eval meer;
-#            service-state wordt vastgelegd vóór wijziging; bestaande
-#            services worden niet uitgeschakeld bij rollback (punt 2).
-#          * verify_installation(): TFTP-bestandstest voor netboot.xyz.kpxe
-#            en netboot.xyz.efi, plus HTTP-body-controle (punt 3).
-#  3.5.0 - Pure-bash netwerkberekening; firewall-XML herstel; SERVICE_STATE;
-#          die() forceert rollback; vier dnsmasq-checks; zone verplicht.
+#  3.7.0 - Deze versie:
+#          * ensure_ownership(): bestaande data wordt niet onbedoeld
+#            gewijzigd. Alleen top-level chown als de map al inhoud heeft;
+#            recursief chownen alleen voor nieuwe/lege mappen. Nieuwe
+#            rollback-actie restore_owner (punt 1).
+#          * Gedrag bij mislukte eindcontrole is expliciet: exit-code 2,
+#            GEEN rollback, met duidelijke uitleg in header en in
+#            print_summary_failure() (punt 2).
+#  3.6.0 - ipcalc-extractie gecorrigeerd met fallback; rollback zonder
+#          eval via getypeerde dispatcher; service-state vastgelegd;
+#          TFTP-bestandstest en HTTP-body-test in eindcontrole.
+#  3.5.0 - Pure-bash netwerkberekening; firewall-XML herstel;
+#          SERVICE_STATE; die() forceert rollback; vier dnsmasq-checks;
+#          zone verplicht.
 #  3.4.0 - Tijdgestempelde back-ups; ProtocolHeader verwijderd;
 #          interfacekeuze via ip link show; dnsmasq include geverifieerd;
 #          containers START_FAILED-flag; firewall via firewall-cmd --state.
@@ -156,7 +191,7 @@ IFS=$'\n\t'
 # =============================================================================
 
 readonly SCRIPT_NAME="$(basename "$0")"
-readonly SCRIPT_VERSION="3.6.0"
+readonly SCRIPT_VERSION="3.7.0"
 readonly LOG_FILE="/var/log/netboot-stack-install.log"
 readonly QUADLET_DIR="/etc/containers/systemd"
 readonly DNSMASQ_CONF_DIR="/etc/dnsmasq.d"
@@ -225,11 +260,12 @@ error() { _log ERROR "$@"; }
 #  ROLLBACK — GETYPEERDE ACTIES (geen eval)
 # =============================================================================
 
-register_rollback_file()         { RB_TYPE+=("restore_file");       RB_ARG1+=("$1"); RB_ARG2+=("$2"); }
-register_rollback_remove()       { RB_TYPE+=("remove_path");        RB_ARG1+=("$1"); RB_ARG2+=("");   }
-register_rollback_service()      { RB_TYPE+=("restore_service");    RB_ARG1+=("$1"); RB_ARG2+=("");   }
-register_rollback_reload_fw()    { RB_TYPE+=("reload_firewall");    RB_ARG1+=("");   RB_ARG2+=("");   }
-register_rollback_daemon_reload(){ RB_TYPE+=("daemon_reload");      RB_ARG1+=("");   RB_ARG2+=("");   }
+register_rollback_file()          { RB_TYPE+=("restore_file");    RB_ARG1+=("$1"); RB_ARG2+=("$2"); }
+register_rollback_remove()        { RB_TYPE+=("remove_path");     RB_ARG1+=("$1"); RB_ARG2+=("");   }
+register_rollback_service()       { RB_TYPE+=("restore_service"); RB_ARG1+=("$1"); RB_ARG2+=("");   }
+register_rollback_owner()         { RB_TYPE+=("restore_owner");   RB_ARG1+=("$1"); RB_ARG2+=("$2"); }
+register_rollback_reload_fw()     { RB_TYPE+=("reload_firewall"); RB_ARG1+=("");   RB_ARG2+=("");   }
+register_rollback_daemon_reload() { RB_TYPE+=("daemon_reload");   RB_ARG1+=("");   RB_ARG2+=("");   }
 
 record_service_state() {
     local svc="$1" was_enabled=0 was_active=0
@@ -243,12 +279,8 @@ restore_service_state() {
     local svc="$1" state="${SERVICE_STATE[$svc]:-}"
     [[ -z "$state" ]] && return 0
     local was_enabled="${state%:*}" was_active="${state#*:}"
-    if (( was_enabled == 0 )); then
-        systemctl disable "$svc" 2>/dev/null || true
-    fi
-    if (( was_active == 0 )); then
-        systemctl stop "$svc" 2>/dev/null || true
-    fi
+    (( was_enabled == 0 )) && systemctl disable "$svc" 2>/dev/null || true
+    (( was_active  == 0 )) && systemctl stop    "$svc" 2>/dev/null || true
 }
 
 perform_rollback() {
@@ -275,6 +307,10 @@ perform_rollback() {
             restore_service)
                 info "  Service-state herstellen: $a1"
                 restore_service_state "$a1" ;;
+            restore_owner)
+                if [[ -e "$a1" && -n "$a2" ]]; then
+                    chown "$a2" "$a1" 2>/dev/null && info "  Eigenaar hersteld: $a1 → $a2"
+                fi ;;
             reload_firewall)
                 firewall-cmd --reload >/dev/null 2>&1 && info "  firewall herladen" ;;
             daemon_reload)
@@ -299,7 +335,7 @@ _on_error() {
     error "Fout opgetreden op regel ${line_no} (exit ${exit_code})."
     perform_rollback
     error "Installatie afgebroken. Zie ${LOG_FILE}."
-    exit "$exit_code"
+    exit 1
 }
 
 _on_interrupt() {
@@ -453,14 +489,12 @@ validate_interface() {
         die "Ongeldige prefix in CIDR: ${cidr}"
     fi
 
-    # --- Primaire methode: ipcalc (correcte extractie) ---
     local netmask="" network=""
     if command_exists ipcalc; then
         netmask="$(ipcalc -m "$cidr" | awk '/^Netmask:/ {print $2}')"
         network="$(ipcalc -n "$cidr" | awk '/^Network:/ {print $2}' | cut -d/ -f1)"
     fi
 
-    # --- Fallback: pure bash ---
     if [[ -z "$netmask" ]]; then
         netmask="$(prefix_to_netmask "$prefix")"
         info "  Netmasker via pure-bash fallback: ${netmask}"
@@ -574,22 +608,62 @@ EOF
 }
 
 # =============================================================================
-#  STAP 5 — MAPPEN
+#  STAP 5 — MAPPEN (data-bescherming)
 # =============================================================================
+#
+# ensure_ownership() onderscheidt drie gevallen:
+#   1. Map bestaat niet          → aanmaken + eigenaar instellen
+#   2. Map bestaat en is leeg    → recursief chownen (veilig)
+#   3. Map bestaat met inhoud    → alleen top-level chown, met waarschuwing
+#
+# In alle gevallen wordt de oorspronkelijke eigenaar vastgelegd voor rollback.
+
+ensure_ownership() {
+    local path="$1" uid="$2" gid="$3"
+    local target="${uid}:${gid}"
+
+    if [[ ! -d "$path" ]]; then
+        mkdir -p "$path"
+        chown "$target" "$path"
+        register_rollback_remove "$path"
+        ok "  $path aangemaakt en eigenaar ingesteld op $target."
+        return 0
+    fi
+
+    local current_owner
+    current_owner="$(stat -c '%u:%g' "$path")"
+
+    if [[ "$current_owner" == "$target" ]]; then
+        ok "  $path heeft al eigenaar $target."
+        return 0
+    fi
+
+    local content_count
+    content_count=$(find "$path" -mindepth 1 -maxdepth 1 2>/dev/null | wc -l)
+
+    if (( content_count == 0 )); then
+        info "  $path is leeg; recursief chown naar $target."
+        chown -R "$target" "$path"
+        register_rollback_owner "$path" "$current_owner"
+    else
+        warn "  $path bevat al ${content_count} item(s); recursief chown wordt NIET uitgevoerd."
+        warn "  Huidige eigenaar: $current_owner, gewenst: $target"
+        warn "  Alleen de top-level map wordt aangepast. Corrigeer indien nodig handmatig:"
+        warn "    chown -R $target $path"
+        chown "$target" "$path"
+        register_rollback_owner "$path" "$current_owner"
+    fi
+}
 
 create_directories() {
     info "[3/9] Mappenstructuur aanmaken..."
-    local dirs=("$TFTP_DIR" "$NETBOOT_CONFIG_DIR" "$DOKUWIKI_DATA_DIR" "$FORGEJO_DATA_DIR")
-    local d
-    for d in "${dirs[@]}"; do
-        if [[ ! -d "$d" ]]; then
-            mkdir -p "$d"
-            register_rollback_remove "$d"
-        fi
-    done
-    chown -R 33:33     "$DOKUWIKI_DATA_DIR" 2>/dev/null || true
-    chown -R 1000:1000 "$FORGEJO_DATA_DIR"  2>/dev/null || true
-    ok "Mappen aangemaakt en rechten ingesteld."
+
+    ensure_ownership "$TFTP_DIR"            root root
+    ensure_ownership "$NETBOOT_CONFIG_DIR"  root root
+    ensure_ownership "$DOKUWIKI_DATA_DIR"   33   33
+    ensure_ownership "$FORGEJO_DATA_DIR"    1000 1000
+
+    ok "Mappenstructuur gereed."
 }
 
 # =============================================================================
@@ -846,8 +920,18 @@ start_containers() {
 }
 
 # =============================================================================
-#  STAP 10 — EINDCONTROLES (uitgebreid)
+#  STAP 10 — EINDCONTROLES
 # =============================================================================
+#
+# BELANGRIJK: een falende eindcontrole leidt NIET tot rollback. Reden:
+# de installatie is technisch voltooid; het falen is een runtime-conditie
+# die vaak tijdelijk is (container nog aan het initialiseren, DNS nog niet
+# verspreid, etc.). Door niets terug te draaien kan de beheerder de situatie
+# live onderzoeken en zo nodig een container herstarten zonder alles
+# opnieuw te installeren.
+#
+# Het onderscheid met fatale fouten tijdens de installatie is zichtbaar in
+# de exit-code: 1 (met rollback) vs 2 (zonder rollback).
 
 verify_installation() {
     info "[8/9] Eindcontroles uitvoeren..."
@@ -872,7 +956,6 @@ verify_installation() {
     ss -tlnp 2>/dev/null | grep -qE '(:|\])80[[:space:]]' \
         || { error "  Geen luisterende HTTP-service op TCP-poort 80."; FAILED=1; }
 
-    # HTTP body-test
     local body
     if body="$(curl -fsS --max-time 5 "http://127.0.0.1/")" && [[ -n "$body" ]]; then
         ok "  HTTP: root geeft niet-lege body ($(wc -c <<<"$body" | tr -d ' ') bytes)."
@@ -881,7 +964,6 @@ verify_installation() {
         FAILED=1
     fi
 
-    # TFTP-test voor beide boot-bestanden
     local f tmp
     tmp="$(mktemp)"
     for f in netboot.xyz.kpxe netboot.xyz.efi; do
@@ -940,22 +1022,35 @@ print_summary_success() {
 print_summary_failure() {
     echo
     echo "============================================================"
-    echo "  Installatie NIET (volledig) geslaagd"
+    echo "  Installatie technisch VOLTOOID, eindcontrole MISLUKT"
     echo "============================================================"
-    echo "  Eén of meer componenten draaien niet."
-    echo "  Zie de meldingen hierboven en het logbestand:"
+    echo "  Bewuste keuze: er is GEEN rollback uitgevoerd."
+    echo "  De installatie is blijven staan zodat je de situatie kunt"
+    echo "  onderzoeken. Herstart een falende container of service en"
+    echo "  draai daarna de eindcontrole handmatig opnieuw."
     echo
-    echo "    ${LOG_FILE}"
+    echo "  Logbestand     : ${LOG_FILE}"
     echo
-    echo "  Mogelijke vervolgstappen:"
-    echo "    - Containerlogs:   podman logs <naam>"
-    echo "    - Servicestatus:   systemctl status <naam>"
-    echo "    - dnsmasq-log:     journalctl -u dnsmasq -f"
-    echo "    - firewalld-log:   journalctl -u firewalld -f"
-    echo "    - Herstart:        systemctl restart <naam>.service"
+    echo "  Onderzoek:"
+    echo "    systemctl status <service>"
+    echo "    journalctl -u <service> -n 50 --no-pager"
+    echo "    podman logs <container>"
+    echo "    ss -ulnp | grep :69"
+    echo "    ss -tlnp | grep :80"
+    echo "    curl -I http://127.0.0.1/"
     echo
-    echo "  Het systeem is in een consistente staat achtergelaten:"
-    echo "  geen rollback uitgevoerd, alle onderdelen blijven staan."
+    echo "  Herstarten:"
+    echo "    systemctl restart dnsmasq"
+    echo "    systemctl restart netbootxyz.service"
+    echo "    systemctl restart dokuwiki.service"
+    echo "    systemctl restart forgejo.service"
+    echo
+    echo "  Handmatig terugrollen (indien gewenst):"
+    echo "    Herstel de .bak.<tijdstempel>-bestanden uit de betreffende"
+    echo "    mappen en draai 'systemctl daemon-reload && firewall-cmd --reload'."
+    echo "    Zie ${LOG_FILE} voor de gemaakte back-ups."
+    echo
+    echo "  Exit-code 2 — onderscheiden van exit 1 (fatale fout + rollback)."
     echo "============================================================"
     echo
 }
@@ -1000,7 +1095,7 @@ main() {
         exit 0
     else
         print_summary_failure
-        exit 1
+        exit 2
     fi
 }
 
