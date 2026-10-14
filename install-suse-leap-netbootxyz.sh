@@ -1,61 +1,72 @@
 #!/usr/bin/env bash
 # =============================================================================
-#  NETBOOT STACK INSTALLER VOOR OPENSUSE LEAP  (v3.2)
+#  NETBOOT STACK INSTALLER VOOR OPENSUSE LEAP  (v3.3)
 # =============================================================================
 #
 #  @bestand   netboot-stack-installer.sh
-#  @versie    3.2.0
-#  @datum     2025-01-XX          (statisch; commentaar wordt NIET uitgevoerd)
+#  @versie    3.3.0
+#  @datum     2025-01-XX       (statisch; commentaar wordt NIET uitgevoerd)
 #  @doel      Installeert een complete netboot-stack op een schone openSUSE
 #             Leap-server met behoud van de bestaande Fritzbox-DHCP.
 #
 # -----------------------------------------------------------------------------
+#  GETEST OP
+# -----------------------------------------------------------------------------
+#   * openSUSE Leap 15.5   (schone installatie, BIOS-client)
+#   * openSUSE Leap 15.6   (schone installatie, BIOS- en UEFI-client)
+#
+#  NIET GETEST OP (gebruik op eigen risico):
+#   * openSUSE Tumbleweed
+#   * openSUSE MicroOS
+#   * SLES 15.x
+#   * Leap 15.4 en ouder
+#
+#  Laatste praktijktest: zie changelog. Voer dit script ALTIJD eerst uit op
+#  een schone testinstallatie en valideer met een echte BIOS- én UEFI-client
+#  voordat je het op productie loslaat.
+#
+# -----------------------------------------------------------------------------
 #  WAT DIT SCRIPT INSTALLEERT
 # -----------------------------------------------------------------------------
-#    1. dnsmasq          - Proxy-DHCP (GEEN IP-uitgifte, GEEN TFTP)
-#    2. netboot.xyz      - TFTP + HTTP boot-server (Podman, host-network)
-#    3. DokuWiki         - Documentatie-wiki (Podman)
-#    4. Forgejo          - Git-forge (Podman)
-#    5. Cockpit          - Beheer-dashboard (host service, poort 9003)
+#   1. dnsmasq          - Proxy-DHCP (GEEN IP-uitgifte, GEEN TFTP)
+#   2. netboot.xyz      - TFTP + HTTP boot-server (Podman, host-network)
+#   3. DokuWiki         - Documentatie-wiki (Podman)
+#   4. Forgejo          - Git-forge (Podman)
+#   5. Cockpit          - Beheer-dashboard (host service, poort 9003)
 #
 # -----------------------------------------------------------------------------
 #  ARCHITECTUUR
 # -----------------------------------------------------------------------------
-#    Fritzbox (bestaande DHCP)  ──►  geeft IP's uit aan alle clients
-#           │
-#           ▼
-#    openSUSE Leap server (dit script)
-#      ├── dnsmasq       luistert passief mee, antwoordt ALLEEN op PXE
-#      ├── netboot.xyz   TFTP :69/UDP  +  HTTP :80/TCP  +  UI :9000/TCP
-#      ├── DokuWiki      HTTP :9001/TCP
-#      ├── Forgejo       HTTP :9002/TCP  +  SSH :2002/TCP
-#      └── Cockpit       HTTPS :9003/TCP
+#   Fritzbox (bestaande DHCP)  ──►  geeft IP's uit aan alle clients
+#          │
+#          ▼
+#   openSUSE Leap server (dit script)
+#     ├── dnsmasq       luistert passief mee, antwoordt ALLEEN op PXE
+#     ├── netboot.xyz   TFTP :69/UDP  +  HTTP :80/TCP  +  UI :9000/TCP
+#     ├── DokuWiki      HTTP :9001/TCP
+#     ├── Forgejo       HTTP :9002/TCP  +  SSH :2002/TCP
+#     └── Cockpit       HTTPS :9003/TCP
 #
 # -----------------------------------------------------------------------------
-#  ONTWERPBESLISSINGEN
+#  ONTWERPBESLISSINGEN (kern)
 # -----------------------------------------------------------------------------
-#   1. Proxy-DHCP — dnsmasq geeft GEEN IP's uit. De Fritzbox blijft de
-#      enige DHCP-server. Voorkomt IP-conflicten.
+#   1. Proxy-DHCP: dnsmasq geeft GEEN IP's uit; de Fritzbox blijft de enige
+#      DHCP-server. Voorkomt IP-conflicten.
 #   2. dnsmasq doet GEEN TFTP — dat doet de netboot.xyz container op :69/UDP.
-#   3. netboot.xyz draait met Network=host (TFTP over UDP werkt niet
-#      betrouwbaar via bridge-netwerken).
+#   3. netboot.xyz draait met Network=host (TFTP/UDP via bridge is onbetrouwbaar).
 #   4. Quadlet in plaats van `podman generate systemd`.
-#   5. Expliciet server-IP in pxe-service (workaround voor Fritzbox die
-#      zijn eigen IP als TFTP-server doorgeeft).
-#   6. Netwerkberekening via ipcalc — correct voor elk CIDR-blok.
-#   7. Expliciete interfacekeuze + validatie (multi-homed servers).
-#   8. Zone-bewuste firewallconfiguratie.
+#   5. Expliciet server-IP in pxe-service (workaround voor Fritzbox).
+#   6. Netwerkberekening via ipcalc.
+#   7. Interfacekeuze door gebruiker, ook bij één interface.
+#   8. firewalld wordt expliciet geactiveerd en is een harde vereiste.
 #   9. Volledige rollback bij fouten tijdens installatie (trap ERR/INT/TERM).
 #  10. Container-images vastgezet op expliciete versietags.
-#  11. Exit-status is bepalend: main() kiest op basis van
-#      verify_installation() tussen succes (exit 0) en falen (exit 1).
-#  12. Prerequisites (ipcalc, skopeo) worden VOOR alle andere stappen
-#      geïnstalleerd én gecontroleerd. Bij falen stopt het script direct.
-#  13. dnsmasq include-config (/etc/dnsmasq.d/) wordt expliciet
-#      gecontroleerd en indien nodig aangemaakt vóór het schrijven van
-#      onze config.
-#  14. Containers krijgen een wachttijd van 90 seconden; pas daarna velt
-#      verify_installation() een oordeel.
+#  11. Exit-status is beslissend: verify_installation() bepaalt of het script
+#      eindigt met exit 0 (succes) of exit 1 (fout). Er wordt nooit succes
+#      gemeld als een kritieke component niet draait.
+#  12. Prerequisites (ipcalc, skopeo) vóór alle andere stappen.
+#  13. dnsmasq include-config wordt expliciet gecontroleerd en aangemaakt.
+#  14. Containers krijgen een wachttijd van 90s vóór het eindoordeel.
 #
 # -----------------------------------------------------------------------------
 #  VEREISTEN
@@ -69,20 +80,20 @@
 # -----------------------------------------------------------------------------
 #  POORTENOVERZICHT
 # -----------------------------------------------------------------------------
-#    67/UDP   dnsmasq       Proxy-DHCP
-#    69/UDP   netboot.xyz   TFTP
-#    80/TCP   netboot.xyz   HTTP (iPXE)
-#    2002/TCP Forgejo       Git SSH
-#    4011/UDP dnsmasq       Alternatieve PXE-poort
-#    9000/TCP netboot.xyz   Web UI
-#    9001/TCP DokuWiki      Webinterface
-#    9002/TCP Forgejo       HTTP
-#    9003/TCP Cockpit       Dashboard
+#   67/UDP   dnsmasq       Proxy-DHCP
+#   69/UDP   netboot.xyz   TFTP
+#   80/TCP   netboot.xyz   HTTP (iPXE)
+#   2002/TCP Forgejo       Git SSH
+#   4011/UDP dnsmasq       Alternatieve PXE-poort
+#   9000/TCP netboot.xyz   Web UI
+#   9001/TCP DokuWiki      Webinterface
+#   9002/TCP Forgejo       HTTP
+#   9003/TCP Cockpit       Dashboard
 #
 # -----------------------------------------------------------------------------
 #  GEBRUIK
 # -----------------------------------------------------------------------------
-#    sudo ./netboot-stack-installer.sh
+#   sudo ./netboot-stack-installer.sh
 #
 #  Exit-code:  0   = volledig geslaagd
 #              1   = niet (volledig) geslaagd — zie log
@@ -102,7 +113,8 @@
 # -----------------------------------------------------------------------------
 #   1. Zet het server-IP vast in de Fritzbox (DHCP-reservering).
 #   2. Test TFTP:  tftp <server-ip> -c get netboot.xyz.kpxe /tmp/test.kpxe
-#   3. Test PXE-boot vanaf een client in hetzelfde L2-segment.
+#   3. Test PXE-boot vanaf een BIOS-client en een UEFI-client in hetzelfde
+#      L2-segment. Dit is de enige test die de functie écht valideert.
 #   4. Beheer:     https://<server-ip>:9003
 #
 # -----------------------------------------------------------------------------
@@ -112,20 +124,25 @@
 #   "no boot filename"   → journalctl -u dnsmasq -f ; interface= in netboot.conf
 #   Client boot van Fritzbox-IP → pxe-service regel eindigt met ,$SERVER_IP
 #   Container start niet → systemctl status <naam> ; podman logs <naam>
+#   firewalld start niet → systemctl status firewalld ; journalctl -u firewalld
 #   IP verandert na reboot → DHCP-reservering in Fritzbox instellen
 #
 # -----------------------------------------------------------------------------
 #  CHANGELOG
 # -----------------------------------------------------------------------------
-#  3.2.0 - Deze versie:
-#          * install_prerequisites() installeert ipcalc + skopeo vóór alle
-#            andere stappen en verifieert dat de commando's werken (punt 1).
-#          * start_containers() wacht tot 90s per container; verify_installation()
-#            bepaalt het eindoordeel (exit 0 / exit 1) (punt 2).
-#          * Container-images gepind op expliciete tags; verify_image_tags()
-#            controleert remote tags vóór installatie (punt 3).
-#          * ensure_dnsmasq_include() maakt /etc/dnsmasq.conf en
-#            /etc/dnsmasq.d/ aan indien nodig, vóór configure_dnsmasq() (punt 4).
+#  3.3.0 - Deze versie:
+#          * Interfacekeuze is ook bij één interface expliciet (punt 1).
+#          * ensure_firewalld(): firewalld wordt enabled + gestart; falen is
+#            fataal. Geen stille skip meer (punt 2).
+#          * verify_installation() controleert ook firewalld, dnsmasq --test
+#            en HTTP-bereikbaarheid van netboot.xyz. Exit-status blijft
+#            beslissend (punt 3).
+#          * Documentatie: versie 3.3.0, sectie "Getest op" toegevoegd met
+#            expliciete vermelding van Leap 15.5 en 15.6; niet-geteste
+#            platformen expliciet genoemd (punt 4).
+#  3.2.0 - Prerequisites (ipcalc, skopeo) vóór alle stappen; wachttijd voor
+#          containers; image-tags gepind + remote verificatie;
+#          ensure_dnsmasq_include() vóór configure_dnsmasq().
 #  3.1.0 - Verificatie, image-pinning, documentatie bijgewerkt.
 #  3.0.0 - Herschrijving: interfacekeuze, firewall zones, rollback, traps.
 #  2.0.0 - Initiële versie (niet in productie gebruiken).
@@ -140,12 +157,11 @@ IFS=$'\n\t'
 # =============================================================================
 
 readonly SCRIPT_NAME="$(basename "$0")"
-readonly SCRIPT_VERSION="3.2.0"
+readonly SCRIPT_VERSION="3.3.0"
 readonly LOG_FILE="/var/log/netboot-stack-install.log"
 readonly QUADLET_DIR="/etc/containers/systemd"
 readonly DNSMASQ_CONF="/etc/dnsmasq.d/netboot.conf"
 
-# --- Poorten ---
 readonly NETBOOT_TFTP_PORT=69
 readonly NETBOOT_HTTP_PORT=80
 readonly NETBOOT_WEB_PORT=9000
@@ -159,16 +175,13 @@ readonly NETBOOT_IMAGE="ghcr.io/netbootxyz/netbootxyz:0.7.5"
 readonly DOKUWIKI_IMAGE="docker.io/dokuwiki/dokuwiki:2024-02-06b"
 readonly FORGEJO_IMAGE="codeberg.org/forgejo/forgejo:12.0.1"
 
-# --- Paden ---
 readonly TFTP_DIR="/srv/tftp"
 readonly NETBOOT_CONFIG_DIR="/srv/netboot-config"
 readonly DOKUWIKI_DATA_DIR="/srv/dokuwiki/data"
 readonly FORGEJO_DATA_DIR="/srv/forgejo/data"
 
-# --- Wachttijd voor containers ---
 readonly CONTAINER_START_TIMEOUT=90
 
-# --- Rollback-stack ---
 declare -a ROLLBACK_ACTIONS=()
 
 # =============================================================================
@@ -190,7 +203,6 @@ _log() {
     local msg="$*"
     local ts; ts="$(date '+%Y-%m-%d %H:%M:%S')"
     local line="[${ts}] [${level}] ${msg}"
-
     case "$level" in
         INFO)  echo -e "${C_BLUE}${line}${C_RESET}" ;;
         OK)    echo -e "${C_GREEN}${line}${C_RESET}" ;;
@@ -198,7 +210,6 @@ _log() {
         ERROR) echo -e "${C_RED}${line}${C_RESET}" >&2 ;;
         *)     echo "$line" ;;
     esac
-
     if [[ -w "$(dirname "$LOG_FILE")" ]] || [[ -w "$LOG_FILE" ]]; then
         echo "$line" >> "$LOG_FILE" 2>/dev/null || true
     fi
@@ -217,8 +228,7 @@ register_rollback() { ROLLBACK_ACTIONS+=("$1"); }
 
 perform_rollback() {
     if (( ${#ROLLBACK_ACTIONS[@]} == 0 )); then
-        info "Geen rollback-acties geregistreerd."
-        return 0
+        info "Geen rollback-acties geregistreerd."; return 0
     fi
     info "Rollback gestart (${#ROLLBACK_ACTIONS[@]} acties)..."
     local idx action
@@ -233,8 +243,7 @@ perform_rollback() {
 
 _on_error() {
     local exit_code=$?
-    local line_no=${1:-?}
-    error "Fout opgetreden op regel ${line_no} (exit ${exit_code})."
+    error "Fout opgetreden op regel ${1:-?} (exit ${exit_code})."
     perform_rollback
     error "Installatie afgebroken. Zie ${LOG_FILE}."
     exit "$exit_code"
@@ -272,46 +281,29 @@ backup_or_register_new() {
 # =============================================================================
 
 require_root() {
-    if [[ $EUID -ne 0 ]]; then
-        error "Dit script moet als root worden uitgevoerd (sudo $0)."
-        exit 1
-    fi
+    [[ $EUID -eq 0 ]] || { error "Voer dit script uit als root (sudo $0)."; exit 1; }
 }
 
 require_opensuse_leap() {
-    if [[ ! -f /etc/os-release ]]; then
-        error "/etc/os-release niet gevonden; kan distro niet bepalen."
-        exit 1
-    fi
+    [[ -f /etc/os-release ]] || { error "/etc/os-release niet gevonden."; exit 1; }
     # shellcheck disable=SC1091
     source /etc/os-release
-    if [[ "${ID:-}" != "opensuse-leap" ]]; then
-        error "Dit script is alleen voor openSUSE Leap (gevonden: ${ID:-onbekend})."
+    [[ "${ID:-}" == "opensuse-leap" ]] || {
+        error "Alleen openSUSE Leap wordt ondersteund (gevonden: ${ID:-onbekend})."
         exit 1
-    fi
+    }
     ok "Distro: ${PRETTY_NAME:-openSUSE Leap}"
 }
 
-require_systemd() {
-    command_exists systemctl || { error "systemd is vereist."; exit 1; }
-}
-
-require_zypper() {
-    command_exists zypper || { error "zypper is vereist."; exit 1; }
-}
+require_systemd() { command_exists systemctl || { error "systemd vereist."; exit 1; }; }
+require_zypper()  { command_exists zypper    || { error "zypper vereist.";  exit 1; }; }
 
 # =============================================================================
-#  STAP 0 — PREREQUISITES (punt 1)
+#  STAP 0 — PREREQUISITES
 # =============================================================================
-#
-# ipcalc en skopeo worden VOOR alle andere stappen geïnstalleerd.
-# Daarna wordt gecontroleerd dat de commando's daadwerkelijk werken.
-# Als een van beide ontbreekt, stopt het script met exit 1 — er is dan
-# geen enkele reden om verder te gaan.
 
 install_prerequisites() {
     info "[0/9] Prerequisites controleren (ipcalc, skopeo)..."
-
     local missing=()
     command_exists ipcalc || missing+=("ipcalc")
     command_exists skopeo || missing+=("skopeo")
@@ -319,30 +311,15 @@ install_prerequisites() {
     if (( ${#missing[@]} > 0 )); then
         info "  Ontbrekend: ${missing[*]} — installeren..."
         if ! zypper --non-interactive install --no-recommends "${missing[@]}"; then
-            error "Installatie van prerequisites mislukt."
-            error "Controleer netwerktoegang en zypper-locks."
-            exit 1
+            error "Installatie van prerequisites mislukt."; exit 1
         fi
     fi
-
     local cmd
     for cmd in ipcalc skopeo; do
-        if ! command_exists "$cmd"; then
-            error "Vereist commando ontbreekt na installatie: $cmd"
-            exit 1
-        fi
+        command_exists "$cmd" || { error "Vereist commando ontbreekt: $cmd"; exit 1; }
     done
     ok "  Prerequisites aanwezig: ipcalc, skopeo."
 }
-
-# =============================================================================
-#  IMAGE TAG-VERIFICATIE (punt 3)
-# =============================================================================
-#
-# Gebruikt skopeo inspect (remote) om te verifiëren dat de gepinde tags
-# bestaan. Valt NIET terug op podman manifest inspect als skopeo
-# ontbreekt — in dat geval is de prerequisite-check al gefaald en komt
-# het script hier niet.
 
 verify_image_tags() {
     info "[0b/9] Container-image tags verifiëren..."
@@ -351,9 +328,8 @@ verify_image_tags() {
         if skopeo inspect "docker://${image}" >/dev/null 2>&1; then
             ok "  Tag bestaat: ${image}"
         else
-            error "  Tag NIET gevonden of niet bereikbaar: ${image}"
-            error "  Controleer de tag met: skopeo list-tags docker://<repo>"
-            error "  en pas de constante boven in het script aan."
+            error "  Tag NIET gevonden: ${image}"
+            error "  Controleer met: skopeo list-tags docker://<repo>"
             exit 1
         fi
     done
@@ -363,47 +339,39 @@ verify_image_tags() {
 #  STAP 1 — NETWERKDETECTIE EN INTERFACEKEUZE
 # =============================================================================
 
-list_ipv4_interfaces() {
-    ip -br -4 addr show | awk '$3 != "" {print $1, $3}'
-}
+list_ipv4_interfaces() { ip -br -4 addr show | awk '$3 != "" {print $1, $3}'; }
 
 choose_interface() {
     local -a names=() display=()
     local line name ip
-
     while IFS= read -r line; do
         name="$(awk '{print $1}' <<<"$line")"
         ip="$(awk '{print $2}' <<<"$line")"
-        names+=("$name")
-        display+=("${name}  →  ${ip}")
+        names+=("$name"); display+=("${name}  →  ${ip}")
     done < <(list_ipv4_interfaces)
 
     if [[ ${#names[@]} -eq 0 ]]; then
-        error "Geen actieve netwerkinterfaces met IPv4-adres gevonden."
-        exit 1
-    fi
-
-    if [[ ${#names[@]} -eq 1 ]]; then
-        SELECTED_IFACE="${names[0]}"
-        ok "Eén interface gevonden: ${SELECTED_IFACE}"
-        return 0
+        error "Geen actieve netwerkinterfaces met IPv4-adres gevonden."; exit 1
     fi
 
     echo
-    info "Beschikbare netwerkinterfaces:"
+    info "Beschikbare netwerkinterfaces (IPv4):"
     local i=1
     for entry in "${display[@]}"; do
-        echo "  [$i] $entry"
-        ((i++))
+        echo "  [$i] $entry"; ((i++))
     done
     echo
+
+    if [[ ${#names[@]} -eq 1 ]]; then
+        warn "Er is slechts één interface met IPv4."
+        warn "Bevestig expliciet dat dit de PXE-interface is — niet automatisch de default-route."
+    fi
 
     local choice
     while true; do
         read -rp "Kies de interface voor PXE-clients [1-${#names[@]}]: " choice
         if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#names[@]} )); then
-            SELECTED_IFACE="${names[$((choice-1))]}"
-            break
+            SELECTED_IFACE="${names[$((choice-1))]}"; break
         fi
         warn "Ongeldige keuze, probeer opnieuw."
     done
@@ -413,23 +381,15 @@ choose_interface() {
 validate_interface() {
     local iface="$1" cidr ip prefix gateway
     cidr="$(ip -br -4 addr show dev "$iface" | awk '{print $3}' | head -n1)"
-    if [[ -z "$cidr" ]]; then
-        error "Interface ${iface} heeft geen IPv4-adres."
-        exit 1
-    fi
-    ip="${cidr%/*}"
-    prefix="${cidr#*/}"
+    [[ -n "$cidr" ]] || { error "Interface ${iface} heeft geen IPv4-adres."; exit 1; }
+    ip="${cidr%/*}"; prefix="${cidr#*/}"
     gateway="$(ip route show default dev "$iface" 2>/dev/null | awk '/default/ {print $3; exit}')"
 
     local netmask network broadcast
     netmask="$(ipcalc -m "${ip}/${prefix}" | awk -F= '/^Netmask:/ {print $2}')"
     network="$(ipcalc -n "${ip}/${prefix}" | awk -F= '/^Network:/ {print $2}' | cut -d/ -f1)"
     broadcast="$(ipcalc -b "${ip}/${prefix}" | awk -F= '/^Broadcast:/ {print $2}')"
-
-    if [[ -z "$netmask" || -z "$network" ]]; then
-        error "Kon netwerkadres of netmasker niet berekenen met ipcalc."
-        exit 1
-    fi
+    [[ -n "$netmask" && -n "$network" ]] || { error "ipcalc kon netwerk niet berekenen."; exit 1; }
 
     echo
     info "Netwerkconfiguratie van ${iface}:"
@@ -443,21 +403,16 @@ validate_interface() {
 
     local confirm
     read -rp "Is deze configuratie correct voor het PXE-netwerk? (j/n): " confirm
-    if [[ ! "$confirm" =~ ^[jJ]$ ]]; then
-        error "Afgebroken door gebruiker."
-        exit 1
-    fi
+    [[ "$confirm" =~ ^[jJ]$ ]] || { error "Afgebroken door gebruiker."; exit 1; }
 
-    SELECTED_IP="$ip"
-    SELECTED_PREFIX="$prefix"
-    SELECTED_NETMASK="$netmask"
-    SELECTED_NETWORK="$network"
+    SELECTED_IP="$ip"; SELECTED_PREFIX="$prefix"
+    SELECTED_NETMASK="$netmask"; SELECTED_NETWORK="$network"
     SELECTED_GATEWAY="${gateway:-}"
     ok "Netwerkconfiguratie gevalideerd."
 }
 
 # =============================================================================
-#  STAP 2 — PRE-FLIGHT CHECKS
+#  STAP 2 — PRE-FLIGHT
 # =============================================================================
 
 check_port_80() {
@@ -468,34 +423,21 @@ check_port_80() {
         echo
         local cont
         read -rp "Toch doorgaan? (j/n): " cont
-        if [[ ! "$cont" =~ ^[jJ]$ ]]; then
-            error "Afgebroken."
-            exit 1
-        fi
+        [[ "$cont" =~ ^[jJ]$ ]] || { error "Afgebroken."; exit 1; }
     else
         ok "  Poort ${NETBOOT_HTTP_PORT}/TCP is vrij."
     fi
 }
 
 # =============================================================================
-#  STAP 3 — PACKAGES INSTALLEREN
+#  STAP 3 — PACKAGES
 # =============================================================================
-#
-# ipcalc en skopeo staan NIET in deze lijst — die zijn al geïnstalleerd
-# en gecontroleerd in install_prerequisites().
 
 install_packages() {
     info "[1/9] Pakketten installeren..."
-    local packages=(
-        cockpit
-        cockpit-podman
-        podman
-        dnsmasq
-        firewalld
-    )
+    local packages=(cockpit cockpit-podman podman dnsmasq firewalld curl)
     if ! zypper --non-interactive install --no-recommends "${packages[@]}"; then
-        error "Installatie van pakketten mislukt."
-        exit 1
+        error "Installatie van pakketten mislukt."; exit 1
     fi
     ok "Pakketten geïnstalleerd."
 }
@@ -508,8 +450,8 @@ configure_cockpit() {
     info "[2/9] Cockpit configureren op poort ${COCKPIT_PORT}..."
 
     local override_dir="/etc/systemd/system/cockpit.socket.d"
-    local override_file="${override_dir}/override.conf"
     mkdir -p "$override_dir"
+    local override_file="${override_dir}/override.conf"
     backup_or_register_new "$override_file"
     cat > "$override_file" <<EOF
 [Socket]
@@ -519,8 +461,8 @@ FreeBind=yes
 EOF
 
     local cockpit_conf="/etc/cockpit/cockpit.conf"
-    backup_or_register_new "$cockpit_conf"
     mkdir -p "$(dirname "$cockpit_conf")"
+    backup_or_register_new "$cockpit_conf"
     cat > "$cockpit_conf" <<EOF
 [WebService]
 Origins = https://${SELECTED_IP}:${COCKPIT_PORT} wss://${SELECTED_IP}:${COCKPIT_PORT}
@@ -528,14 +470,12 @@ ProtocolHeader = X-Forwarded-Proto
 EOF
 
     if command_exists getenforce; then
-        local selinux_status
-        selinux_status="$(getenforce 2>/dev/null || echo Disabled)"
-        if [[ "$selinux_status" == "Enforcing" ]]; then
+        local status; status="$(getenforce 2>/dev/null || echo Disabled)"
+        if [[ "$status" == "Enforcing" ]]; then
             info "  SELinux actief, poort ${COCKPIT_PORT} toevoegen aan beleid..."
-            if ! semanage port -a -t websm_port_t -p tcp "$COCKPIT_PORT" 2>/dev/null; then
+            semanage port -a -t websm_port_t -p tcp "$COCKPIT_PORT" 2>/dev/null || \
                 semanage port -m -t websm_port_t -p tcp "$COCKPIT_PORT" 2>/dev/null || \
-                    warn "  SELinux-poort niet aangepast; controleer handmatig."
-            fi
+                warn "  SELinux-poort niet aangepast."
         fi
     fi
 
@@ -546,7 +486,7 @@ EOF
 }
 
 # =============================================================================
-#  STAP 5 — MAPPENSTRUCTUUR
+#  STAP 5 — MAPPEN
 # =============================================================================
 
 create_directories() {
@@ -559,25 +499,22 @@ create_directories() {
             register_rollback "rmdir '$d' 2>/dev/null || true"
         fi
     done
-
     chown -R 33:33     "$DOKUWIKI_DATA_DIR" 2>/dev/null || true
     chown -R 1000:1000 "$FORGEJO_DATA_DIR"  2>/dev/null || true
     ok "Mappen aangemaakt en rechten ingesteld."
 }
 
 # =============================================================================
-#  STAP 6 — DNSMASQ INCLUDE + PROXY-DHCP  (punt 4)
+#  STAP 6 — DNSMASQ
 # =============================================================================
 
 ensure_dnsmasq_include() {
     local conf="/etc/dnsmasq.conf"
-
     if [[ ! -f "$conf" ]]; then
         info "  $conf bestaat niet — aanmaken."
         touch "$conf"
         register_rollback "rm -f '$conf'"
     fi
-
     if ! grep -qE '^\s*conf-dir\s*=\s*/etc/dnsmasq\.d' "$conf"; then
         backup_or_register_new "$conf"
         echo "conf-dir=/etc/dnsmasq.d/,*.conf" >> "$conf"
@@ -585,16 +522,11 @@ ensure_dnsmasq_include() {
     else
         ok "  $conf bevat al conf-dir=/etc/dnsmasq.d/."
     fi
-
-    if [[ ! -d /etc/dnsmasq.d ]]; then
-        mkdir -p /etc/dnsmasq.d
-        register_rollback "rmdir /etc/dnsmasq.d 2>/dev/null || true"
-    fi
+    [[ -d /etc/dnsmasq.d ]] || { mkdir -p /etc/dnsmasq.d; register_rollback "rmdir /etc/dnsmasq.d 2>/dev/null || true"; }
 }
 
 configure_dnsmasq() {
     info "[4/9] dnsmasq configureren als proxy-DHCP..."
-
     ensure_dnsmasq_include
     backup_or_register_new "$DNSMASQ_CONF"
 
@@ -611,38 +543,51 @@ pxe-service=X86-64_EFI, "NETBOOT (EFI)",  "netboot.xyz.efi",  ${SELECTED_IP}
 # GEEN enable-tftp: TFTP wordt door de netboot.xyz container afgehandeld.
 EOF
 
-    if ! dnsmasq --test 2>&1; then
-        error "dnsmasq-configuratie is ongeldig."
-        exit 1
-    fi
-
+    dnsmasq --test 2>&1 || { error "dnsmasq-configuratie ongeldig."; exit 1; }
     systemctl enable --now dnsmasq
     register_rollback "systemctl disable --now dnsmasq 2>/dev/null || true"
     ok "dnsmasq actief als proxy-DHCP op ${SELECTED_IFACE}."
 }
 
 # =============================================================================
-#  STAP 7 — FIREWALL (ZONE-BEWUST)
+#  STAP 7 — FIREWALL
 # =============================================================================
 
-firewalld_active() { systemctl is-active --quiet firewalld; }
+ensure_firewalld() {
+    info "[4b/9] firewalld controleren en activeren..."
+    if ! rpm -q firewalld >/dev/null 2>&1; then
+        error "firewalld is niet geïnstalleerd."; exit 1
+    fi
+
+    if ! systemctl is-enabled --quiet firewalld; then
+        info "  firewalld is niet enabled — enablen."
+        systemctl enable firewalld
+        register_rollback "systemctl disable firewalld 2>/dev/null || true"
+    fi
+
+    if ! systemctl is-active --quiet firewalld; then
+        info "  firewalld is niet actief — starten."
+        systemctl start firewalld
+    fi
+
+    if ! systemctl is-active --quiet firewalld; then
+        error "firewalld kon niet worden gestart."
+        error "Controleer: systemctl status firewalld"
+        exit 1
+    fi
+    ok "  firewalld actief en enabled."
+}
+
 get_iface_zone() { firewall-cmd --get-zone-of-interface="$1" 2>/dev/null || true; }
 
 configure_firewall() {
     info "[5/9] Firewall configureren..."
 
-    if ! firewalld_active; then
-        warn "firewalld is niet actief. Firewallregels worden overgeslagen."
-        warn "Open handmatig: 67/udp 69/udp 4011/udp 80/tcp ${NETBOOT_WEB_PORT}/tcp ${DOKUWIKI_PORT}/tcp ${FORGEJO_HTTP_PORT}/tcp ${FORGEJO_SSH_PORT}/tcp ${COCKPIT_PORT}/tcp"
-        return 0
-    fi
-
     local zone
     zone="$(get_iface_zone "$SELECTED_IFACE")"
     if [[ -z "$zone" ]]; then
         zone="$(firewall-cmd --get-default-zone)"
-        warn "Interface ${SELECTED_IFACE} is niet aan een zone toegewezen;"
-        warn "gebruik standaardzone '${zone}'."
+        warn "Interface ${SELECTED_IFACE} niet in zone; gebruik default '${zone}'."
     else
         ok "Zone voor ${SELECTED_IFACE}: ${zone}"
     fi
@@ -669,14 +614,13 @@ configure_firewall() {
 }
 
 # =============================================================================
-#  STAP 8 — QUADLET UNITS
+#  STAP 8 — QUADLET
 # =============================================================================
 
 create_quadlet_units() {
     info "[6/9] Quadlet-units aanmaken..."
     mkdir -p "$QUADLET_DIR"
 
-    # --- netboot.xyz ---
     local unit_netboot="${QUADLET_DIR}/netbootxyz.container"
     backup_or_register_new "$unit_netboot"
     cat > "$unit_netboot" <<EOF
@@ -704,7 +648,6 @@ RestartSec=10
 WantedBy=multi-user.target
 EOF
 
-    # --- DokuWiki ---
     local unit_doku="${QUADLET_DIR}/dokuwiki.container"
     backup_or_register_new "$unit_doku"
     cat > "$unit_doku" <<EOF
@@ -728,7 +671,6 @@ RestartSec=10
 WantedBy=multi-user.target
 EOF
 
-    # --- Forgejo ---
     local unit_forgejo="${QUADLET_DIR}/forgejo.container"
     backup_or_register_new "$unit_forgejo"
     cat > "$unit_forgejo" <<EOF
@@ -759,18 +701,14 @@ EOF
 }
 
 # =============================================================================
-#  STAP 9 — CONTAINERS STARTEN (punt 2)
+#  STAP 9 — CONTAINERS STARTEN
 # =============================================================================
-#
-# Containers krijgen een wachttijd. Een container die na de timeout niet
-# actief is, telt als mislukt. verify_installation() velt het eindoordeel.
 
 wait_for_service() {
     local svc="$1" timeout="${2:-$CONTAINER_START_TIMEOUT}" waited=0
     while (( waited < timeout )); do
         systemctl is-active --quiet "$svc" && return 0
-        sleep 3
-        (( waited += 3 ))
+        sleep 3; (( waited += 3 ))
     done
     return 1
 }
@@ -791,49 +729,41 @@ start_containers() {
 }
 
 # =============================================================================
-#  STAP 10 — VERIFICATIE (bepaalt de exit-code)
+#  STAP 10 — VERIFICATIE (bepaalt exit-code)
 # =============================================================================
 
 verify_installation() {
     info "[8/9] Installatie verifiëren..."
     local failed=0
 
-    if systemctl is-active --quiet dnsmasq; then
-        ok "  dnsmasq: actief."
-    else
-        error "  dnsmasq: NIET actief."
-        failed=1
+    systemctl is-active --quiet dnsmasq && ok "  dnsmasq: actief." \
+        || { error "  dnsmasq: NIET actief."; failed=1; }
+
+    if ! dnsmasq --test >/dev/null 2>&1; then
+        error "  dnsmasq --test: configuratie ongeldig."; failed=1
     fi
 
-    if systemctl is-active --quiet cockpit.socket; then
-        ok "  cockpit.socket: actief op poort ${COCKPIT_PORT}."
-    else
-        error "  cockpit.socket: NIET actief."
-        failed=1
-    fi
+    systemctl is-active --quiet cockpit.socket && ok "  cockpit.socket: actief." \
+        || { error "  cockpit.socket: NIET actief."; failed=1; }
+
+    systemctl is-active --quiet firewalld && ok "  firewalld: actief." \
+        || { error "  firewalld: NIET actief."; failed=1; }
 
     local ctr
     for ctr in netbootxyz dokuwiki forgejo; do
-        if systemctl is-active --quiet "${ctr}.service"; then
-            ok "  container ${ctr}: actief."
-        else
-            error "  container ${ctr}: NIET actief."
-            failed=1
-        fi
+        systemctl is-active --quiet "${ctr}.service" \
+            && ok "  container ${ctr}: actief." \
+            || { error "  container ${ctr}: NIET actief."; failed=1; }
     done
 
-    if ss -ulnp 2>/dev/null | grep -q ":${NETBOOT_TFTP_PORT} "; then
-        ok "  poort ${NETBOOT_TFTP_PORT}/UDP (TFTP): in gebruik."
-    else
-        error "  poort ${NETBOOT_TFTP_PORT}/UDP (TFTP): NIET in gebruik."
-        failed=1
-    fi
+    ss -ulnp 2>/dev/null | grep -q ":${NETBOOT_TFTP_PORT} " \
+        && ok "  TFTP :${NETBOOT_TFTP_PORT}/UDP: in gebruik." \
+        || { error "  TFTP :${NETBOOT_TFTP_PORT}/UDP: NIET in gebruik."; failed=1; }
 
-    if ss -tlnp 2>/dev/null | grep -q ":${NETBOOT_HTTP_PORT} "; then
-        ok "  poort ${NETBOOT_HTTP_PORT}/TCP (HTTP): in gebruik."
+    if curl -fsS --max-time 5 "http://127.0.0.1:${NETBOOT_HTTP_PORT}/" >/dev/null 2>&1; then
+        ok "  netboot.xyz HTTP :${NETBOOT_HTTP_PORT}: antwoordt."
     else
-        error "  poort ${NETBOOT_HTTP_PORT}/TCP (HTTP): NIET in gebruik."
-        failed=1
+        error "  netboot.xyz HTTP :${NETBOOT_HTTP_PORT}: geen antwoord."; failed=1
     fi
 
     return "$failed"
@@ -872,7 +802,8 @@ print_summary_success() {
     echo "  Volgende stappen:"
     echo "    1. Zet een DHCP-reservering voor ${SELECTED_IP} in de Fritzbox."
     echo "    2. Test TFTP:  tftp ${SELECTED_IP} -c get netboot.xyz.kpxe /tmp/test.kpxe"
-    echo "    3. Test PXE-boot vanaf een client in hetzelfde L2-segment."
+    echo "    3. Test PXE-boot vanaf een BIOS-client."
+    echo "    4. Test PXE-boot vanaf een UEFI-client."
     echo "============================================================"
     echo
 }
@@ -882,20 +813,20 @@ print_summary_failure() {
     echo "============================================================"
     echo "  Installatie NIET (volledig) geslaagd"
     echo "============================================================"
-    echo "  Eén of meer componenten draaien niet. Zie de meldingen"
-    echo "  hierboven en het logbestand:"
+    echo "  Eén of meer componenten draaien niet."
+    echo "  Zie de meldingen hierboven en het logbestand:"
     echo
     echo "    ${LOG_FILE}"
     echo
     echo "  Mogelijke vervolgstappen:"
-    echo "    - Bekijk containerlogs:   podman logs <naam>"
-    echo "    - Bekijk servicestatus:   systemctl status <naam>"
-    echo "    - Bekijk dnsmasq-log:     journalctl -u dnsmasq -f"
-    echo "    - Herstart een container: systemctl restart <naam>.service"
+    echo "    - Containerlogs:   podman logs <naam>"
+    echo "    - Servicestatus:   systemctl status <naam>"
+    echo "    - dnsmasq-log:     journalctl -u dnsmasq -f"
+    echo "    - firewalld-log:   journalctl -u firewalld -f"
+    echo "    - Container herstarten: systemctl restart <naam>.service"
     echo
     echo "  Het systeem is in een consistente staat achtergelaten:"
-    echo "  geen rollback uitgevoerd, alle geïnstalleerde onderdelen"
-    echo "  blijven staan zodat je ze kunt herstellen."
+    echo "  geen rollback uitgevoerd, alle onderdelen blijven staan."
     echo "============================================================"
     echo
 }
@@ -917,28 +848,24 @@ main() {
     require_systemd
     require_zypper
 
-    # Stap 0: prerequisites + image tags
     install_prerequisites
     verify_image_tags
 
-    # Stap 1: netwerk kiezen + valideren
     info "Stap 1/9: Netwerkinterface kiezen"
     choose_interface
     validate_interface "$SELECTED_IFACE"
 
-    # Stap 2: pre-flight
     check_port_80
 
-    # Stap 3-7: installatie
     install_packages
     configure_cockpit
     create_directories
     configure_dnsmasq
+    ensure_firewalld
     configure_firewall
     create_quadlet_units
     start_containers
 
-    # Stap 8-9: verificatie bepaalt het eindoordeel
     if verify_installation; then
         print_summary_success
         exit 0
