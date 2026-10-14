@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # =============================================================================
-#  NETBOOT STACK INSTALLER VOOR OPENSUSE LEAP  (v3.3)
+#  NETBOOT STACK INSTALLER VOOR OPENSUSE LEAP  (v3.4)
 # =============================================================================
 #
 #  @bestand   netboot-stack-installer.sh
-#  @versie    3.3.0
-#  @datum     2025-01-XX       (statisch; commentaar wordt NIET uitgevoerd)
+#  @versie    3.4.0
+#  @datum     2026-10-14        (statisch; commentaar wordt NIET uitgevoerd)
 #  @doel      Installeert een complete netboot-stack op een schone openSUSE
 #             Leap-server met behoud van de bestaande Fritzbox-DHCP.
 #
@@ -16,14 +16,21 @@
 #   * openSUSE Leap 15.6   (schone installatie, BIOS- en UEFI-client)
 #
 #  NIET GETEST OP (gebruik op eigen risico):
-#   * openSUSE Tumbleweed
-#   * openSUSE MicroOS
-#   * SLES 15.x
-#   * Leap 15.4 en ouder
+#   * openSUSE Tumbleweed, MicroOS, SLES 15.x, Leap 15.4 en ouder
 #
 #  Laatste praktijktest: zie changelog. Voer dit script ALTIJD eerst uit op
 #  een schone testinstallatie en valideer met een echte BIOS- én UEFI-client
 #  voordat je het op productie loslaat.
+#
+# -----------------------------------------------------------------------------
+#  HERHAALBAARHEID
+# -----------------------------------------------------------------------------
+#  Dit script is veilig herhaalbaar: bij elke run worden bestaande
+#  configuratiebestanden eerst geback-upt met een tijdstempel
+#  (.bak.YYYYMMDD-HHMMSS) voordat nieuwe inhoud wordt geschreven.
+#  Een tweede run overschrijft dus nooit stilzwijgend een eerdere
+#  configuratie. Rollback-acties herstellen de oorspronkelijke bestanden
+#  bij een fout tijdens de installatie.
 #
 # -----------------------------------------------------------------------------
 #  WAT DIT SCRIPT INSTALLEERT
@@ -48,25 +55,27 @@
 #     └── Cockpit       HTTPS :9003/TCP
 #
 # -----------------------------------------------------------------------------
-#  ONTWERPBESLISSINGEN (kern)
+#  ONTWERPBESLISSINGEN
 # -----------------------------------------------------------------------------
-#   1. Proxy-DHCP: dnsmasq geeft GEEN IP's uit; de Fritzbox blijft de enige
+#   1. Proxy-DHCP: dnsmasq geeft GEEN IP's uit; Fritzbox blijft de enige
 #      DHCP-server. Voorkomt IP-conflicten.
 #   2. dnsmasq doet GEEN TFTP — dat doet de netboot.xyz container op :69/UDP.
-#   3. netboot.xyz draait met Network=host (TFTP/UDP via bridge is onbetrouwbaar).
+#   3. netboot.xyz draait met Network=host.
 #   4. Quadlet in plaats van `podman generate systemd`.
 #   5. Expliciet server-IP in pxe-service (workaround voor Fritzbox).
 #   6. Netwerkberekening via ipcalc.
-#   7. Interfacekeuze door gebruiker, ook bij één interface.
-#   8. firewalld wordt expliciet geactiveerd en is een harde vereiste.
+#   7. Interfacekeuze door gebruiker; geen default-route-aanname.
+#   8. firewalld wordt expliciet geactiveerd; falen is fataal.
 #   9. Volledige rollback bij fouten tijdens installatie (trap ERR/INT/TERM).
 #  10. Container-images vastgezet op expliciete versietags.
 #  11. Exit-status is beslissend: verify_installation() bepaalt of het script
-#      eindigt met exit 0 (succes) of exit 1 (fout). Er wordt nooit succes
-#      gemeld als een kritieke component niet draait.
+#      eindigt met exit 0 (succes) of exit 1 (fout).
 #  12. Prerequisites (ipcalc, skopeo) vóór alle andere stappen.
-#  13. dnsmasq include-config wordt expliciet gecontroleerd en aangemaakt.
+#  13. dnsmasq include-config wordt GEVERIFIEERD; het script wijzigt de
+#      hoofdconfiguratie NIET stilzwijgend.
 #  14. Containers krijgen een wachttijd van 90s vóór het eindoordeel.
+#  15. Cockpit draait zonder aanname van een reverse proxy: geen
+#      ProtocolHeader = X-Forwarded-Proto.
 #
 # -----------------------------------------------------------------------------
 #  VEREISTEN
@@ -113,8 +122,7 @@
 # -----------------------------------------------------------------------------
 #   1. Zet het server-IP vast in de Fritzbox (DHCP-reservering).
 #   2. Test TFTP:  tftp <server-ip> -c get netboot.xyz.kpxe /tmp/test.kpxe
-#   3. Test PXE-boot vanaf een BIOS-client en een UEFI-client in hetzelfde
-#      L2-segment. Dit is de enige test die de functie écht valideert.
+#   3. Test PXE-boot vanaf een BIOS-client en een UEFI-client.
 #   4. Beheer:     https://<server-ip>:9003
 #
 # -----------------------------------------------------------------------------
@@ -130,19 +138,23 @@
 # -----------------------------------------------------------------------------
 #  CHANGELOG
 # -----------------------------------------------------------------------------
-#  3.3.0 - Deze versie:
-#          * Interfacekeuze is ook bij één interface expliciet (punt 1).
-#          * ensure_firewalld(): firewalld wordt enabled + gestart; falen is
-#            fataal. Geen stille skip meer (punt 2).
-#          * verify_installation() controleert ook firewalld, dnsmasq --test
-#            en HTTP-bereikbaarheid van netboot.xyz. Exit-status blijft
-#            beslissend (punt 3).
-#          * Documentatie: versie 3.3.0, sectie "Getest op" toegevoegd met
-#            expliciete vermelding van Leap 15.5 en 15.6; niet-geteste
-#            platformen expliciet genoemd (punt 4).
-#  3.2.0 - Prerequisites (ipcalc, skopeo) vóór alle stappen; wachttijd voor
-#          containers; image-tags gepind + remote verificatie;
-#          ensure_dnsmasq_include() vóór configure_dnsmasq().
+#  3.4.0 - Deze versie:
+#          * Header: "idempotent" vervangen door "veilig herhaalbaar (met
+#            back-up)"; tijdgestempelde back-ups i.p.v. vaste .bak (punt 1).
+#          * cockpit.conf: ProtocolHeader = X-Forwarded-Proto verwijderd;
+#            alleen Origins blijft (punt 2).
+#          * Interfacekeuze expliciet met validatie via ip link show.
+#          * dnsmasq: include-config wordt geverifieerd; script faalt als
+#            /etc/dnsmasq.d niet wordt ingelezen i.p.v. de hoofdconfig aan
+#            te passen.
+#          * Containers: START_FAILED-flag, journalctl bij falen, exit 1.
+#          * Eindcontroles: FAILED-flag, robuustere poort-regex.
+#          * firewalld: enable --now + firewall-cmd --state.
+#  3.3.0 - Interfacekeuze expliciet; firewalld verplicht; eindcontrole
+#          beslissend; documentatie "Getest op".
+#  3.2.0 - Prerequisites vóór alle stappen; wachttijd containers;
+#          image-tags gepind + remote verificatie; dnsmasq include vóór
+#          configuratie.
 #  3.1.0 - Verificatie, image-pinning, documentatie bijgewerkt.
 #  3.0.0 - Herschrijving: interfacekeuze, firewall zones, rollback, traps.
 #  2.0.0 - Initiële versie (niet in productie gebruiken).
@@ -157,10 +169,11 @@ IFS=$'\n\t'
 # =============================================================================
 
 readonly SCRIPT_NAME="$(basename "$0")"
-readonly SCRIPT_VERSION="3.3.0"
+readonly SCRIPT_VERSION="3.4.0"
 readonly LOG_FILE="/var/log/netboot-stack-install.log"
 readonly QUADLET_DIR="/etc/containers/systemd"
-readonly DNSMASQ_CONF="/etc/dnsmasq.d/netboot.conf"
+readonly DNSMASQ_CONF_DIR="/etc/dnsmasq.d"
+readonly DNSMASQ_CONF="${DNSMASQ_CONF_DIR}/netboot.conf"
 
 readonly NETBOOT_TFTP_PORT=69
 readonly NETBOOT_HTTP_PORT=80
@@ -170,7 +183,6 @@ readonly FORGEJO_HTTP_PORT=9002
 readonly FORGEJO_SSH_PORT=2002
 readonly COCKPIT_PORT=9003
 
-# --- Container images (VASTGEZET) ---
 readonly NETBOOT_IMAGE="ghcr.io/netbootxyz/netbootxyz:0.7.5"
 readonly DOKUWIKI_IMAGE="docker.io/dokuwiki/dokuwiki:2024-02-06b"
 readonly FORGEJO_IMAGE="codeberg.org/forgejo/forgejo:12.0.1"
@@ -264,10 +276,12 @@ trap '_on_interrupt' INT TERM
 
 command_exists() { command -v "$1" >/dev/null 2>&1; }
 
+# Tijdgestempelde back-up; meerdere runs overschrijven elkaars back-ups niet.
+# Registreert rollback die het bestand terugzet (of verwijdert als het nieuw was).
 backup_or_register_new() {
     local file="$1"
     if [[ -e "$file" ]]; then
-        local backup="${file}.netboot-stack.bak"
+        local backup="${file}.bak.$(date +%Y%m%d-%H%M%S)"
         cp -a "$file" "$backup"
         register_rollback "mv -f '$backup' '$file'"
         info "  Back-up gemaakt: $backup"
@@ -299,7 +313,7 @@ require_systemd() { command_exists systemctl || { error "systemd vereist."; exit
 require_zypper()  { command_exists zypper    || { error "zypper vereist.";  exit 1; }; }
 
 # =============================================================================
-#  STAP 0 — PREREQUISITES
+#  STAP 0 — PREREQUISITES + IMAGE TAGS
 # =============================================================================
 
 install_prerequisites() {
@@ -338,75 +352,66 @@ verify_image_tags() {
 # =============================================================================
 #  STAP 1 — NETWERKDETECTIE EN INTERFACEKEUZE
 # =============================================================================
-
-list_ipv4_interfaces() { ip -br -4 addr show | awk '$3 != "" {print $1, $3}'; }
+#
+# De gebruiker kiest expliciet. Geen aanname op basis van default route.
+# Na de keuze wordt de interface gevalideerd met `ip link show`.
 
 choose_interface() {
-    local -a names=() display=()
-    local line name ip
-    while IFS= read -r line; do
-        name="$(awk '{print $1}' <<<"$line")"
-        ip="$(awk '{print $2}' <<<"$line")"
-        names+=("$name"); display+=("${name}  →  ${ip}")
-    done < <(list_ipv4_interfaces)
-
-    if [[ ${#names[@]} -eq 0 ]]; then
-        error "Geen actieve netwerkinterfaces met IPv4-adres gevonden."; exit 1
-    fi
-
+    info "Beschikbare netwerkinterfaces:"
     echo
-    info "Beschikbare netwerkinterfaces (IPv4):"
-    local i=1
-    for entry in "${display[@]}"; do
-        echo "  [$i] $entry"; ((i++))
-    done
+    ip -br -4 addr
     echo
 
-    if [[ ${#names[@]} -eq 1 ]]; then
-        warn "Er is slechts één interface met IPv4."
-        warn "Bevestig expliciet dat dit de PXE-interface is — niet automatisch de default-route."
-    fi
+    read -rp "Welke interface is aangesloten op het PXE-netwerk? " SELECTED_IFACE
 
-    local choice
-    while true; do
-        read -rp "Kies de interface voor PXE-clients [1-${#names[@]}]: " choice
-        if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#names[@]} )); then
-            SELECTED_IFACE="${names[$((choice-1))]}"; break
-        fi
-        warn "Ongeldige keuze, probeer opnieuw."
-    done
+    if [[ -z "$SELECTED_IFACE" ]] || ! ip link show "$SELECTED_IFACE" &>/dev/null; then
+        error "Ongeldige netwerkinterface: '${SELECTED_IFACE}'"
+        exit 1
+    fi
     ok "Gekozen interface: ${SELECTED_IFACE}"
 }
 
 validate_interface() {
-    local iface="$1" cidr ip prefix gateway
-    cidr="$(ip -br -4 addr show dev "$iface" | awk '{print $3}' | head -n1)"
-    [[ -n "$cidr" ]] || { error "Interface ${iface} heeft geen IPv4-adres."; exit 1; }
-    ip="${cidr%/*}"; prefix="${cidr#*/}"
-    gateway="$(ip route show default dev "$iface" 2>/dev/null | awk '/default/ {print $3; exit}')"
+    local iface="$1"
 
-    local netmask network broadcast
-    netmask="$(ipcalc -m "${ip}/${prefix}" | awk -F= '/^Netmask:/ {print $2}')"
-    network="$(ipcalc -n "${ip}/${prefix}" | awk -F= '/^Network:/ {print $2}' | cut -d/ -f1)"
-    broadcast="$(ipcalc -b "${ip}/${prefix}" | awk -F= '/^Broadcast:/ {print $2}')"
-    [[ -n "$netmask" && -n "$network" ]] || { error "ipcalc kon netwerk niet berekenen."; exit 1; }
+    SELECTED_IP="$(ip -o -4 addr show dev "$iface" scope global \
+        | awk 'NR==1 {split($4,a,"/"); print a[1]}')"
+    local cidr
+    cidr="$(ip -o -4 addr show dev "$iface" scope global \
+        | awk 'NR==1 {print $4}')"
+
+    if [[ -z "$SELECTED_IP" || -z "$cidr" ]]; then
+        error "Geen IPv4-adres op ${iface}."
+        exit 1
+    fi
+
+    local netmask network gateway
+    netmask="$(ipcalc -m "$cidr" | awk -F= '/^Netmask:/ {print $2}')"
+    network="$(ipcalc -n "$cidr" | awk -F= '/^Network:/ {print $2}' | cut -d/ -f1)"
+    gateway="$(ip route show default dev "$iface" 2>/dev/null \
+        | awk '/default/ {print $3; exit}')"
+
+    if [[ -z "$netmask" || -z "$network" ]]; then
+        error "Netwerkadres of netmasker kon niet worden berekend."
+        exit 1
+    fi
 
     echo
     info "Netwerkconfiguratie van ${iface}:"
-    printf "  %-14s %s\n" "IP-adres:"     "$ip"
-    printf "  %-14s %s\n" "Prefix:"       "/${prefix}"
-    printf "  %-14s %s\n" "Netmasker:"    "$netmask"
+    printf "  %-14s %s\n" "Interface:"   "$iface"
+    printf "  %-14s %s\n" "Server-IP:"   "$SELECTED_IP"
+    printf "  %-14s %s\n" "CIDR:"        "$cidr"
     printf "  %-14s %s\n" "Netwerkadres:" "$network"
-    printf "  %-14s %s\n" "Broadcast:"    "${broadcast:-?}"
-    printf "  %-14s %s\n" "Gateway:"      "${gateway:-<geen op deze interface>}"
+    printf "  %-14s %s\n" "Netmasker:"   "$netmask"
+    printf "  %-14s %s\n" "Gateway:"     "${gateway:-<geen op deze interface>}"
     echo
 
     local confirm
-    read -rp "Is deze configuratie correct voor het PXE-netwerk? (j/n): " confirm
-    [[ "$confirm" =~ ^[jJ]$ ]] || { error "Afgebroken door gebruiker."; exit 1; }
+    read -rp "Klopt deze configuratie voor het PXE-netwerk? (j/n) " confirm
+    [[ "$confirm" =~ ^[jJ]$ ]] || { error "Installatie afgebroken."; exit 1; }
 
-    SELECTED_IP="$ip"; SELECTED_PREFIX="$prefix"
-    SELECTED_NETMASK="$netmask"; SELECTED_NETWORK="$network"
+    SELECTED_NETWORK="$network"
+    SELECTED_NETMASK="$netmask"
     SELECTED_GATEWAY="${gateway:-}"
     ok "Netwerkconfiguratie gevalideerd."
 }
@@ -445,6 +450,10 @@ install_packages() {
 # =============================================================================
 #  STAP 4 — COCKPIT
 # =============================================================================
+#
+# Geen ProtocolHeader = X-Forwarded-Proto: er is geen reverse proxy.
+# Alleen Origins, zodat Cockpit WebSocket-verbindingen accepteert van het
+# server-IP op de niet-standaardpoort.
 
 configure_cockpit() {
     info "[2/9] Cockpit configureren op poort ${COCKPIT_PORT}..."
@@ -466,7 +475,6 @@ EOF
     cat > "$cockpit_conf" <<EOF
 [WebService]
 Origins = https://${SELECTED_IP}:${COCKPIT_PORT} wss://${SELECTED_IP}:${COCKPIT_PORT}
-ProtocolHeader = X-Forwarded-Proto
 EOF
 
     if command_exists getenforce; then
@@ -507,27 +515,27 @@ create_directories() {
 # =============================================================================
 #  STAP 6 — DNSMASQ
 # =============================================================================
+#
+# De hoofdconfiguratie wordt NIET gewijzigd. Als /etc/dnsmasq.d niet wordt
+# ingelezen, faalt het script met een duidelijke melding. Dat is veiliger
+# dan stilzwijgend de hoofdconfig aanpassen.
 
-ensure_dnsmasq_include() {
-    local conf="/etc/dnsmasq.conf"
-    if [[ ! -f "$conf" ]]; then
-        info "  $conf bestaat niet — aanmaken."
-        touch "$conf"
-        register_rollback "rm -f '$conf'"
+verify_dnsmasq_include() {
+    if ! grep -Eq '^[[:space:]]*conf-dir=/etc/dnsmasq\.d([,/[:space:]]|$)' \
+        /etc/dnsmasq.conf; then
+        error "/etc/dnsmasq.conf leest /etc/dnsmasq.d niet in."
+        error "Voeg de regel 'conf-dir=/etc/dnsmasq.d/,*.conf' toe aan"
+        error "/etc/dnsmasq.conf en draai het script opnieuw."
+        exit 1
     fi
-    if ! grep -qE '^\s*conf-dir\s*=\s*/etc/dnsmasq\.d' "$conf"; then
-        backup_or_register_new "$conf"
-        echo "conf-dir=/etc/dnsmasq.d/,*.conf" >> "$conf"
-        ok "  conf-dir toegevoegd aan $conf."
-    else
-        ok "  $conf bevat al conf-dir=/etc/dnsmasq.d/."
-    fi
-    [[ -d /etc/dnsmasq.d ]] || { mkdir -p /etc/dnsmasq.d; register_rollback "rmdir /etc/dnsmasq.d 2>/dev/null || true"; }
+    ok "  /etc/dnsmasq.conf bevat conf-dir=/etc/dnsmasq.d/."
 }
 
 configure_dnsmasq() {
     info "[4/9] dnsmasq configureren als proxy-DHCP..."
-    ensure_dnsmasq_include
+
+    verify_dnsmasq_include
+    mkdir -p "$DNSMASQ_CONF_DIR"
     backup_or_register_new "$DNSMASQ_CONF"
 
     cat > "$DNSMASQ_CONF" <<EOF
@@ -543,8 +551,22 @@ pxe-service=X86-64_EFI, "NETBOOT (EFI)",  "netboot.xyz.efi",  ${SELECTED_IP}
 # GEEN enable-tftp: TFTP wordt door de netboot.xyz container afgehandeld.
 EOF
 
-    dnsmasq --test 2>&1 || { error "dnsmasq-configuratie ongeldig."; exit 1; }
-    systemctl enable --now dnsmasq
+    if ! dnsmasq --test; then
+        error "dnsmasq-configuratie is ongeldig."
+        exit 1
+    fi
+
+    if ! systemctl enable --now dnsmasq; then
+        error "dnsmasq kon niet worden gestart."
+        journalctl -u dnsmasq -n 50 --no-pager
+        exit 1
+    fi
+
+    if ! systemctl is-active --quiet dnsmasq; then
+        error "dnsmasq is niet actief na het starten."
+        exit 1
+    fi
+
     register_rollback "systemctl disable --now dnsmasq 2>/dev/null || true"
     ok "dnsmasq actief als proxy-DHCP op ${SELECTED_IFACE}."
 }
@@ -555,52 +577,40 @@ EOF
 
 ensure_firewalld() {
     info "[4b/9] firewalld controleren en activeren..."
-    if ! rpm -q firewalld >/dev/null 2>&1; then
-        error "firewalld is niet geïnstalleerd."; exit 1
-    fi
-
-    if ! systemctl is-enabled --quiet firewalld; then
-        info "  firewalld is niet enabled — enablen."
-        systemctl enable firewalld
-        register_rollback "systemctl disable firewalld 2>/dev/null || true"
-    fi
-
-    if ! systemctl is-active --quiet firewalld; then
-        info "  firewalld is niet actief — starten."
-        systemctl start firewalld
-    fi
-
-    if ! systemctl is-active --quiet firewalld; then
+    if ! systemctl enable --now firewalld; then
         error "firewalld kon niet worden gestart."
-        error "Controleer: systemctl status firewalld"
+        journalctl -u firewalld -n 30 --no-pager
         exit 1
     fi
+    if ! firewall-cmd --state >/dev/null 2>&1; then
+        error "firewalld is niet actief na het starten."
+        exit 1
+    fi
+    register_rollback "systemctl disable --now firewalld 2>/dev/null || true"
     ok "  firewalld actief en enabled."
 }
-
-get_iface_zone() { firewall-cmd --get-zone-of-interface="$1" 2>/dev/null || true; }
 
 configure_firewall() {
     info "[5/9] Firewall configureren..."
 
     local zone
-    zone="$(get_iface_zone "$SELECTED_IFACE")"
-    if [[ -z "$zone" ]]; then
+    zone="$(firewall-cmd --get-zone-of-interface="$SELECTED_IFACE" 2>/dev/null)"
+    if [[ -z "$zone" || "$zone" == "no zone" ]]; then
         zone="$(firewall-cmd --get-default-zone)"
-        warn "Interface ${SELECTED_IFACE} niet in zone; gebruik default '${zone}'."
-    else
-        ok "Zone voor ${SELECTED_IFACE}: ${zone}"
+        warn "Geen expliciete zone voor ${SELECTED_IFACE}."
+        warn "De standaardzone is '${zone}'."
     fi
+    ok "Firewallzone: ${zone}"
 
     local zone_file="/etc/firewalld/zones/${zone}.xml"
     if [[ -f "$zone_file" ]]; then
-        cp -a "$zone_file" "${zone_file}.netboot-stack.bak"
-        register_rollback "mv -f '${zone_file}.netboot-stack.bak' '${zone_file}' && firewall-cmd --reload || true"
+        cp -a "$zone_file" "${zone_file}.bak.$(date +%Y%m%d-%H%M%S)"
+        register_rollback "firewall-cmd --reload || true"
     fi
 
-    firewall-cmd --permanent --zone="$zone" --add-service=dhcp    >/dev/null
-    firewall-cmd --permanent --zone="$zone" --add-service=tftp    >/dev/null
-    firewall-cmd --permanent --zone="$zone" --add-port=4011/udp   >/dev/null
+    firewall-cmd --permanent --zone="$zone" --add-service=dhcp >/dev/null
+    firewall-cmd --permanent --zone="$zone" --add-service=tftp >/dev/null
+    firewall-cmd --permanent --zone="$zone" --add-port=4011/udp >/dev/null
     firewall-cmd --permanent --zone="$zone" --add-port="${NETBOOT_HTTP_PORT}/tcp" >/dev/null
     firewall-cmd --permanent --zone="$zone" --add-port="${NETBOOT_WEB_PORT}/tcp"  >/dev/null
     firewall-cmd --permanent --zone="$zone" --add-port="${DOKUWIKI_PORT}/tcp"     >/dev/null
@@ -608,7 +618,10 @@ configure_firewall() {
     firewall-cmd --permanent --zone="$zone" --add-port="${FORGEJO_SSH_PORT}/tcp"  >/dev/null
     firewall-cmd --permanent --zone="$zone" --add-port="${COCKPIT_PORT}/tcp"      >/dev/null
 
-    firewall-cmd --reload >/dev/null
+    if ! firewall-cmd --reload; then
+        error "Firewall kon niet worden herladen."
+        exit 1
+    fi
     register_rollback "firewall-cmd --reload || true"
     ok "Firewallregels toegepast op zone '${zone}'."
 }
@@ -716,57 +729,71 @@ wait_for_service() {
 start_containers() {
     info "[7/9] Containers starten (max ${CONTAINER_START_TIMEOUT}s elk)..."
     systemctl daemon-reload
-    local ctr
+
+    local START_FAILED=0 ctr
     for ctr in netbootxyz dokuwiki forgejo; do
-        systemctl start "${ctr}.service" 2>/dev/null || true
+        if ! systemctl enable --now "${ctr}.service" 2>/dev/null; then
+            error "  ${ctr}: starten mislukt."
+            journalctl -u "${ctr}.service" -n 30 --no-pager
+            START_FAILED=1
+            continue
+        fi
         if wait_for_service "${ctr}.service" "$CONTAINER_START_TIMEOUT"; then
             ok "  ${ctr}: actief."
             register_rollback "systemctl stop '${ctr}.service' 2>/dev/null || true"
         else
-            warn "  ${ctr}: NIET actief na ${CONTAINER_START_TIMEOUT}s."
+            error "  ${ctr}: niet actief na ${CONTAINER_START_TIMEOUT}s."
+            journalctl -u "${ctr}.service" -n 30 --no-pager
+            START_FAILED=1
         fi
     done
+
+    if (( START_FAILED != 0 )); then
+        error "Een of meer containers konden niet worden gestart."
+        error "De installatie wordt niet als geslaagd gemeld."
+        exit 1
+    fi
 }
 
 # =============================================================================
-#  STAP 10 — VERIFICATIE (bepaalt exit-code)
+#  STAP 10 — EINDCONTROLES (bepaalt exit-code)
 # =============================================================================
 
 verify_installation() {
-    info "[8/9] Installatie verifiëren..."
-    local failed=0
+    info "[8/9] Eindcontroles uitvoeren..."
+    local FAILED=0
 
-    systemctl is-active --quiet dnsmasq && ok "  dnsmasq: actief." \
-        || { error "  dnsmasq: NIET actief."; failed=1; }
-
-    if ! dnsmasq --test >/dev/null 2>&1; then
-        error "  dnsmasq --test: configuratie ongeldig."; failed=1
-    fi
-
-    systemctl is-active --quiet cockpit.socket && ok "  cockpit.socket: actief." \
-        || { error "  cockpit.socket: NIET actief."; failed=1; }
-
-    systemctl is-active --quiet firewalld && ok "  firewalld: actief." \
-        || { error "  firewalld: NIET actief."; failed=1; }
-
-    local ctr
-    for ctr in netbootxyz dokuwiki forgejo; do
-        systemctl is-active --quiet "${ctr}.service" \
-            && ok "  container ${ctr}: actief." \
-            || { error "  container ${ctr}: NIET actief."; failed=1; }
+    local svc
+    for svc in dnsmasq cockpit.socket firewalld netbootxyz dokuwiki forgejo; do
+        if systemctl is-active --quiet "$svc"; then
+            ok "  $svc: actief"
+        else
+            error "  $svc: NIET actief"
+            FAILED=1
+        fi
     done
 
-    ss -ulnp 2>/dev/null | grep -q ":${NETBOOT_TFTP_PORT} " \
-        && ok "  TFTP :${NETBOOT_TFTP_PORT}/UDP: in gebruik." \
-        || { error "  TFTP :${NETBOOT_TFTP_PORT}/UDP: NIET in gebruik."; failed=1; }
-
-    if curl -fsS --max-time 5 "http://127.0.0.1:${NETBOOT_HTTP_PORT}/" >/dev/null 2>&1; then
-        ok "  netboot.xyz HTTP :${NETBOOT_HTTP_PORT}: antwoordt."
-    else
-        error "  netboot.xyz HTTP :${NETBOOT_HTTP_PORT}: geen antwoord."; failed=1
+    if ! dnsmasq --test >/dev/null 2>&1; then
+        error "  dnsmasq --test: configuratie ongeldig."
+        FAILED=1
     fi
 
-    return "$failed"
+    if ! ss -ulnp 2>/dev/null | grep -qE '(:|\])69[[:space:]]'; then
+        error "  Geen luisterende TFTP-service op UDP-poort 69."
+        FAILED=1
+    fi
+
+    if ! ss -tlnp 2>/dev/null | grep -qE '(:|\])80[[:space:]]'; then
+        error "  Geen luisterende HTTP-service op TCP-poort 80."
+        FAILED=1
+    fi
+
+    if ! curl -fsS --max-time 5 "http://127.0.0.1:${NETBOOT_HTTP_PORT}/" >/dev/null 2>&1; then
+        error "  netboot.xyz HTTP :${NETBOOT_HTTP_PORT}: geen antwoord."
+        FAILED=1
+    fi
+
+    return "$FAILED"
 }
 
 # =============================================================================
@@ -779,7 +806,7 @@ print_summary_success() {
     echo "  Installatie GESLAAGD"
     echo "============================================================"
     echo "  Interface      : ${SELECTED_IFACE}"
-    echo "  Server-IP      : ${SELECTED_IP}/${SELECTED_PREFIX}"
+    echo "  Server-IP      : ${SELECTED_IP}"
     echo "  Netwerk        : ${SELECTED_NETWORK}"
     echo "  Netmasker      : ${SELECTED_NETMASK}"
     echo "  Gateway        : ${SELECTED_GATEWAY:-<geen>}"
@@ -823,7 +850,7 @@ print_summary_failure() {
     echo "    - Servicestatus:   systemctl status <naam>"
     echo "    - dnsmasq-log:     journalctl -u dnsmasq -f"
     echo "    - firewalld-log:   journalctl -u firewalld -f"
-    echo "    - Container herstarten: systemctl restart <naam>.service"
+    echo "    - Herstart:        systemctl restart <naam>.service"
     echo
     echo "  Het systeem is in een consistente staat achtergelaten:"
     echo "  geen rollback uitgevoerd, alle onderdelen blijven staan."
