@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # =============================================================================
-#  NETBOOT STACK INSTALLER VOOR OPENSUSE LEAP  (v3.1)
+#  NETBOOT STACK INSTALLER VOOR OPENSUSE LEAP  (v3.2)
 # =============================================================================
 #
 #  @bestand   netboot-stack-installer.sh
-#  @versie    3.1.0
+#  @versie    3.2.0
 #  @datum     2025-01-XX          (statisch; commentaar wordt NIET uitgevoerd)
 #  @doel      Installeert een complete netboot-stack op een schone openSUSE
 #             Leap-server met behoud van de bestaande Fritzbox-DHCP.
@@ -12,20 +12,15 @@
 # -----------------------------------------------------------------------------
 #  WAT DIT SCRIPT INSTALLEERT
 # -----------------------------------------------------------------------------
-#
 #    1. dnsmasq          - Proxy-DHCP (GEEN IP-uitgifte, GEEN TFTP)
 #    2. netboot.xyz      - TFTP + HTTP boot-server (Podman, host-network)
 #    3. DokuWiki         - Documentatie-wiki (Podman)
 #    4. Forgejo          - Git-forge (Podman)
 #    5. Cockpit          - Beheer-dashboard (host service, poort 9003)
 #
-#  Alle containers worden beheerd via Quadlet-bestanden in
-#  /etc/containers/systemd/ en starten automatisch bij boot.
-#
 # -----------------------------------------------------------------------------
 #  ARCHITECTUUR
 # -----------------------------------------------------------------------------
-#
 #    Fritzbox (bestaande DHCP)  ──►  geeft IP's uit aan alle clients
 #           │
 #           ▼
@@ -39,65 +34,41 @@
 # -----------------------------------------------------------------------------
 #  ONTWERPBESLISSINGEN
 # -----------------------------------------------------------------------------
-#
-#  1. Proxy-DHCP in plaats van een tweede DHCP-server.
-#     De Fritzbox ondersteunt geen PXE-opties. Een tweede DHCP-server op
-#     hetzelfde L2-segment veroorzaakt IP-conflicten. dnsmasq in proxy-modus
-#     antwoordt ALLEEN op PXE-verzoeken en geeft geen IP's uit.
-#
-#  2. dnsmasq doet GEEN TFTP.
-#     De netboot.xyz container heeft een ingebouwde TFTP-server op :69/UDP
-#     (host-network). Twee TFTP-servers op dezelfde poort conflicteren.
-#
-#  3. netboot.xyz draait met Network=host.
-#     TFTP gebruikt UDP met dynamische poorten; bridged networking is
-#     onbetrouwbaar. Host-network is de enige werkende optie.
-#
-#  4. Quadlet in plaats van `podman generate systemd`.
-#     Declaratief, systemd-native, volledig integreerbaar met Cockpit.
-#
-#  5. Expliciet server-IP in pxe-service.
-#     De Fritzbox geeft soms zijn eigen IP als TFTP-server door. Door
-#     expliciet het server-IP op te nemen in de pxe-service regel,
-#     omzeilen we dit probleem.
-#
-#  6. Netwerkberekening via ipcalc.
-#     Correct voor elk CIDR-blok, niet alleen /24.
-#
-#  7. Expliciete interfacekeuze + validatie.
-#     Op multi-homed servers is de default-route-interface niet altijd
-#     de PXE-interface. De gebruiker kiest, het script valideert.
-#
-#  8. Zone-bewuste firewallconfiguratie.
-#     Regels worden toegepast op de zone waarin de gekozen interface
-#     zich daadwerkelijk bevindt.
-#
-#  9. Volledige rollback.
-#     Bij elke fout worden alle wijzigingen teruggedraaid via een LIFO-stack.
-#
-# 10. Vastgezette container-images.
-#     Alle images gebruiken expliciete versietags. `latest` en `stable`
-#     worden NIET gebruikt, zodat installaties reproduceerbaar zijn.
-#
-# 11. Verificatie bepaalt het eindoordeel.
-#     Als dnsmasq, cockpit.socket of een container niet actief is, eindigt
-#     het script met exit-code 1 en wordt NIET gemeld dat de installatie
-#     geslaagd is.
+#   1. Proxy-DHCP — dnsmasq geeft GEEN IP's uit. De Fritzbox blijft de
+#      enige DHCP-server. Voorkomt IP-conflicten.
+#   2. dnsmasq doet GEEN TFTP — dat doet de netboot.xyz container op :69/UDP.
+#   3. netboot.xyz draait met Network=host (TFTP over UDP werkt niet
+#      betrouwbaar via bridge-netwerken).
+#   4. Quadlet in plaats van `podman generate systemd`.
+#   5. Expliciet server-IP in pxe-service (workaround voor Fritzbox die
+#      zijn eigen IP als TFTP-server doorgeeft).
+#   6. Netwerkberekening via ipcalc — correct voor elk CIDR-blok.
+#   7. Expliciete interfacekeuze + validatie (multi-homed servers).
+#   8. Zone-bewuste firewallconfiguratie.
+#   9. Volledige rollback bij fouten tijdens installatie (trap ERR/INT/TERM).
+#  10. Container-images vastgezet op expliciete versietags.
+#  11. Exit-status is bepalend: main() kiest op basis van
+#      verify_installation() tussen succes (exit 0) en falen (exit 1).
+#  12. Prerequisites (ipcalc, skopeo) worden VOOR alle andere stappen
+#      geïnstalleerd én gecontroleerd. Bij falen stopt het script direct.
+#  13. dnsmasq include-config (/etc/dnsmasq.d/) wordt expliciet
+#      gecontroleerd en indien nodig aangemaakt vóór het schrijven van
+#      onze config.
+#  14. Containers krijgen een wachttijd van 90 seconden; pas daarna velt
+#      verify_installation() een oordeel.
 #
 # -----------------------------------------------------------------------------
 #  VEREISTEN
 # -----------------------------------------------------------------------------
-#
-#  * openSUSE Leap 15.5 of nieuwer
-#  * Root-toegang
-#  * Minimaal 2 GB RAM, 20 GB vrije schijfruimte
-#  * Internettoegang voor packages en container-images
-#  * Server in hetzelfde L2-segment als de PXE-clients
+#   * openSUSE Leap 15.5 of nieuwer
+#   * Root-toegang
+#   * Minimaal 2 GB RAM, 20 GB vrije schijfruimte
+#   * Internettoegang voor packages en container-images
+#   * Server in hetzelfde L2-segment als de PXE-clients
 #
 # -----------------------------------------------------------------------------
 #  POORTENOVERZICHT
 # -----------------------------------------------------------------------------
-#
 #    67/UDP   dnsmasq       Proxy-DHCP
 #    69/UDP   netboot.xyz   TFTP
 #    80/TCP   netboot.xyz   HTTP (iPXE)
@@ -111,22 +82,17 @@
 # -----------------------------------------------------------------------------
 #  GEBRUIK
 # -----------------------------------------------------------------------------
-#
 #    sudo ./netboot-stack-installer.sh
 #
-#  Logbestand: /var/log/netboot-stack-install.log
-#  Exit-code : 0 = installatie volledig geslaagd
-#              1 = installatie niet (volledig) geslaagd — zie log
+#  Exit-code:  0   = volledig geslaagd
+#              1   = niet (volledig) geslaagd — zie log
 #              130 = onderbroken door gebruiker
 #
 # -----------------------------------------------------------------------------
 #  CONTAINER-IMAGES (VASTGEZET)
 # -----------------------------------------------------------------------------
-#
-#  De images zijn vastgezet op specifieke versies. Nieuwe versies uitbrengen
-#  betekent: tag aanpassen, script opnieuw draaien, Quadlet wordt bijgewerkt.
-#
-#  Om te controleren welke tags beschikbaar zijn:
+#  Pas de tags aan naar de actuele stabiele versie vóór productiegebruik.
+#  Controleer met:
 #    skopeo list-tags docker://ghcr.io/netbootxyz/netbootxyz
 #    skopeo list-tags docker://docker.io/dokuwiki/dokuwiki
 #    skopeo list-tags docker://codeberg.org/forgejo/forgejo
@@ -134,55 +100,34 @@
 # -----------------------------------------------------------------------------
 #  NA INSTALLATIE
 # -----------------------------------------------------------------------------
-#
-#  1. Zet het server-IP vast in de Fritzbox (DHCP-reservering).
-#  2. Test TFTP:  tftp <server-ip> -c get netboot.xyz.kpxe /tmp/test.kpxe
-#  3. Test PXE-boot vanaf een client in hetzelfde netwerk.
-#  4. Beheer:     https://<server-ip>:9003
+#   1. Zet het server-IP vast in de Fritzbox (DHCP-reservering).
+#   2. Test TFTP:  tftp <server-ip> -c get netboot.xyz.kpxe /tmp/test.kpxe
+#   3. Test PXE-boot vanaf een client in hetzelfde L2-segment.
+#   4. Beheer:     https://<server-ip>:9003
 #
 # -----------------------------------------------------------------------------
 #  TROUBLESHOOTING
 # -----------------------------------------------------------------------------
-#
-#  "TFTP timeout"
-#    → ss -ulnp | grep :69        (container moet luisteren)
-#    → podman logs netbootxyz
-#    → firewall-cmd --list-all
-#
-#  "no boot filename"
-#    → journalctl -u dnsmasq -f  (proxy-DHCP antwoordt niet)
-#    → controleer interface= in /etc/dnsmasq.d/netboot.conf
-#
-#  Client boot van Fritzbox-IP
-#    → controleer of pxe-service regel eindigt met ,$SERVER_IP
-#
-#  Container start niet
-#    → systemctl status <naam>.service
-#    → podman logs <naam>
-#    → ss -tlnp  (poortconflict?)
-#    → controleer of de gepinde image-tag nog bestaat
-#
-#  IP verandert na reboot
-#    → DHCP-reservering in Fritzbox instellen
+#   "TFTP timeout"       → ss -ulnp | grep :69 ; podman logs netbootxyz
+#   "no boot filename"   → journalctl -u dnsmasq -f ; interface= in netboot.conf
+#   Client boot van Fritzbox-IP → pxe-service regel eindigt met ,$SERVER_IP
+#   Container start niet → systemctl status <naam> ; podman logs <naam>
+#   IP verandert na reboot → DHCP-reservering in Fritzbox instellen
 #
 # -----------------------------------------------------------------------------
 #  CHANGELOG
 # -----------------------------------------------------------------------------
-#  3.1.0 - Deze versie:
-#          * Verificatie bepaalt de exit-code (punt 4).
-#          * Alle container-images vastgezet op expliciete tags (punt 5).
-#          * Header bijgewerkt: versie 3.1.0, statische datum (punt 6).
-#          * Nieuwe functie verify_image_tags() controleert tag-bestaan
-#            vóór installatie.
-#  3.0.0 - Herschreven:
-#          * Expliciete interfacekeuze + validatie (multi-homed)
-#          * Zone-bewuste firewallconfiguratie
-#          * Volledige rollback + traps (ERR/INT/TERM)
-#          * Distro- en prerequisite-checks
-#          * Logging naar /var/log/netboot-stack-install.log
-#          * Backup van bestaande configs vóór overschrijven
-#          * Verificatie van services en poorten na installatie
-#          * Correcties DokuWiki (poort 80, uid 33)
+#  3.2.0 - Deze versie:
+#          * install_prerequisites() installeert ipcalc + skopeo vóór alle
+#            andere stappen en verifieert dat de commando's werken (punt 1).
+#          * start_containers() wacht tot 90s per container; verify_installation()
+#            bepaalt het eindoordeel (exit 0 / exit 1) (punt 2).
+#          * Container-images gepind op expliciete tags; verify_image_tags()
+#            controleert remote tags vóór installatie (punt 3).
+#          * ensure_dnsmasq_include() maakt /etc/dnsmasq.conf en
+#            /etc/dnsmasq.d/ aan indien nodig, vóór configure_dnsmasq() (punt 4).
+#  3.1.0 - Verificatie, image-pinning, documentatie bijgewerkt.
+#  3.0.0 - Herschrijving: interfacekeuze, firewall zones, rollback, traps.
 #  2.0.0 - Initiële versie (niet in productie gebruiken).
 #
 # =============================================================================
@@ -195,7 +140,7 @@ IFS=$'\n\t'
 # =============================================================================
 
 readonly SCRIPT_NAME="$(basename "$0")"
-readonly SCRIPT_VERSION="3.1.0"
+readonly SCRIPT_VERSION="3.2.0"
 readonly LOG_FILE="/var/log/netboot-stack-install.log"
 readonly QUADLET_DIR="/etc/containers/systemd"
 readonly DNSMASQ_CONF="/etc/dnsmasq.d/netboot.conf"
@@ -209,22 +154,7 @@ readonly FORGEJO_HTTP_PORT=9002
 readonly FORGEJO_SSH_PORT=2002
 readonly COCKPIT_PORT=9003
 
-# --- Container images (VASTGEZET op specifieke versies) ---
-#
-# WAAROM VASTGEZET?
-# `latest` en `stable` veranderen zonder waarschuwing. Een installatie die
-# vandaag werkt kan morgen falen omdat een image ineens een andere config
-# of poort gebruikt. Door expliciete tags te gebruiken, is de installatie
-# reproduceerbaar en voorspelbaar.
-#
-# CONTROLE:
-#   skopeo list-tags docker://ghcr.io/netbootxyz/netbootxyz
-#   skopeo list-tags docker://docker.io/dokuwiki/dokuwiki
-#   skopeo list-tags docker://codeberg.org/forgejo/forgejo
-#
-# Bijwerken: tag aanpassen → script opnieuw draaien → Quadlet wordt
-# overschreven (met backup) en container wordt herstart.
-
+# --- Container images (VASTGEZET) ---
 readonly NETBOOT_IMAGE="ghcr.io/netbootxyz/netbootxyz:0.7.5"
 readonly DOKUWIKI_IMAGE="docker.io/dokuwiki/dokuwiki:2024-02-06b"
 readonly FORGEJO_IMAGE="codeberg.org/forgejo/forgejo:12.0.1"
@@ -234,6 +164,9 @@ readonly TFTP_DIR="/srv/tftp"
 readonly NETBOOT_CONFIG_DIR="/srv/netboot-config"
 readonly DOKUWIKI_DATA_DIR="/srv/dokuwiki/data"
 readonly FORGEJO_DATA_DIR="/srv/forgejo/data"
+
+# --- Wachttijd voor containers ---
+readonly CONTAINER_START_TIMEOUT=90
 
 # --- Rollback-stack ---
 declare -a ROLLBACK_ACTIONS=()
@@ -280,9 +213,7 @@ error() { _log ERROR "$@"; }
 #  ROLLBACK & TRAPS
 # =============================================================================
 
-register_rollback() {
-    ROLLBACK_ACTIONS+=("$1")
-}
+register_rollback() { ROLLBACK_ACTIONS+=("$1"); }
 
 perform_rollback() {
     if (( ${#ROLLBACK_ACTIONS[@]} == 0 )); then
@@ -362,78 +293,67 @@ require_opensuse_leap() {
 }
 
 require_systemd() {
-    if ! command_exists systemctl; then
-        error "systemd is vereist maar niet gevonden."
-        exit 1
-    fi
+    command_exists systemctl || { error "systemd is vereist."; exit 1; }
 }
 
 require_zypper() {
-    if ! command_exists zypper; then
-        error "zypper is vereist maar niet gevonden."
-        exit 1
-    fi
+    command_exists zypper || { error "zypper is vereist."; exit 1; }
 }
 
 # =============================================================================
-#  STAP 0 — VOORBEREIDING
-# =============================================================================
-
-print_banner() {
-    echo "============================================================"
-    echo "  netboot-stack installer voor openSUSE Leap"
-    echo "  Versie: ${SCRIPT_VERSION}"
-    echo "  Log:    ${LOG_FILE}"
-    echo "============================================================"
-    echo
-}
-
-ensure_ipcalc() {
-    if ! command_exists ipcalc; then
-        info "ipcalc installeren (nodig voor netwerkberekening)..."
-        zypper --non-interactive install ipcalc >/dev/null
-    fi
-}
-
-# =============================================================================
-#  IMAGE TAG-VERIFICATIE (punt 5)
+#  STAP 0 — PREREQUISITES (punt 1)
 # =============================================================================
 #
-# Controleert vóór installatie of de vastgezette tags daadwerkelijk bestaan.
-# Gebruikt skopeo (indien aanwezig) of `podman manifest inspect`. Als geen
-# van beide werkt, wordt de controle overgeslagen met een waarschuwing.
+# ipcalc en skopeo worden VOOR alle andere stappen geïnstalleerd.
+# Daarna wordt gecontroleerd dat de commando's daadwerkelijk werken.
+# Als een van beide ontbreekt, stopt het script met exit 1 — er is dan
+# geen enkele reden om verder te gaan.
 
-verify_image_tags() {
-    info "[0/9] Container-image tags verifiëren..."
+install_prerequisites() {
+    info "[0/9] Prerequisites controleren (ipcalc, skopeo)..."
 
-    local checker=""
-    if command_exists skopeo; then
-        checker="skopeo"
-    elif command_exists podman; then
-        checker="podman"
-    else
-        warn "skopeo/podman niet gevonden; tag-verificatie overgeslagen."
-        return 0
+    local missing=()
+    command_exists ipcalc || missing+=("ipcalc")
+    command_exists skopeo || missing+=("skopeo")
+
+    if (( ${#missing[@]} > 0 )); then
+        info "  Ontbrekend: ${missing[*]} — installeren..."
+        if ! zypper --non-interactive install --no-recommends "${missing[@]}"; then
+            error "Installatie van prerequisites mislukt."
+            error "Controleer netwerktoegang en zypper-locks."
+            exit 1
+        fi
     fi
 
+    local cmd
+    for cmd in ipcalc skopeo; do
+        if ! command_exists "$cmd"; then
+            error "Vereist commando ontbreekt na installatie: $cmd"
+            exit 1
+        fi
+    done
+    ok "  Prerequisites aanwezig: ipcalc, skopeo."
+}
+
+# =============================================================================
+#  IMAGE TAG-VERIFICATIE (punt 3)
+# =============================================================================
+#
+# Gebruikt skopeo inspect (remote) om te verifiëren dat de gepinde tags
+# bestaan. Valt NIET terug op podman manifest inspect als skopeo
+# ontbreekt — in dat geval is de prerequisite-check al gefaald en komt
+# het script hier niet.
+
+verify_image_tags() {
+    info "[0b/9] Container-image tags verifiëren..."
     local image
     for image in "$NETBOOT_IMAGE" "$DOKUWIKI_IMAGE" "$FORGEJO_IMAGE"; do
-        local ok_tag=0
-        if [[ "$checker" == "skopeo" ]]; then
-            if skopeo inspect "docker://${image}" >/dev/null 2>&1; then
-                ok_tag=1
-            fi
-        else
-            if podman manifest inspect "$image" >/dev/null 2>&1; then
-                ok_tag=1
-            fi
-        fi
-
-        if (( ok_tag == 1 )); then
+        if skopeo inspect "docker://${image}" >/dev/null 2>&1; then
             ok "  Tag bestaat: ${image}"
         else
             error "  Tag NIET gevonden of niet bereikbaar: ${image}"
-            error "  Controleer de tag en pas de constante boven in het script aan."
+            error "  Controleer de tag met: skopeo list-tags docker://<repo>"
+            error "  en pas de constante boven in het script aan."
             exit 1
         fi
     done
@@ -448,8 +368,7 @@ list_ipv4_interfaces() {
 }
 
 choose_interface() {
-    local -a names=()
-    local -a display=()
+    local -a names=() display=()
     local line name ip
 
     while IFS= read -r line; do
@@ -492,15 +411,12 @@ choose_interface() {
 }
 
 validate_interface() {
-    local iface="$1"
-    local cidr ip prefix gateway
-
+    local iface="$1" cidr ip prefix gateway
     cidr="$(ip -br -4 addr show dev "$iface" | awk '{print $3}' | head -n1)"
     if [[ -z "$cidr" ]]; then
         error "Interface ${iface} heeft geen IPv4-adres."
         exit 1
     fi
-
     ip="${cidr%/*}"
     prefix="${cidr#*/}"
     gateway="$(ip route show default dev "$iface" 2>/dev/null | awk '/default/ {print $3; exit}')"
@@ -561,18 +477,12 @@ check_port_80() {
     fi
 }
 
-check_dnsmasq_include() {
-    if [[ -f /etc/dnsmasq.conf ]] && ! grep -qE '^\s*conf-dir\s*=\s*/etc/dnsmasq\.d' /etc/dnsmasq.conf; then
-        warn "/etc/dnsmasq.conf bevat geen conf-dir=/etc/dnsmasq.d/."
-        warn "We voegen deze regel toe."
-        backup_or_register_new "/etc/dnsmasq.conf"
-        echo "conf-dir=/etc/dnsmasq.d/,*.conf" >> /etc/dnsmasq.conf
-    fi
-}
-
 # =============================================================================
 #  STAP 3 — PACKAGES INSTALLEREN
 # =============================================================================
+#
+# ipcalc en skopeo staan NIET in deze lijst — die zijn al geïnstalleerd
+# en gecontroleerd in install_prerequisites().
 
 install_packages() {
     info "[1/9] Pakketten installeren..."
@@ -582,8 +492,6 @@ install_packages() {
         podman
         dnsmasq
         firewalld
-        ipcalc
-        skopeo
     )
     if ! zypper --non-interactive install --no-recommends "${packages[@]}"; then
         error "Installatie van pakketten mislukt."
@@ -593,7 +501,7 @@ install_packages() {
 }
 
 # =============================================================================
-#  STAP 4 — COCKPIT CONFIGUREREN
+#  STAP 4 — COCKPIT
 # =============================================================================
 
 configure_cockpit() {
@@ -601,7 +509,6 @@ configure_cockpit() {
 
     local override_dir="/etc/systemd/system/cockpit.socket.d"
     local override_file="${override_dir}/override.conf"
-
     mkdir -p "$override_dir"
     backup_or_register_new "$override_file"
     cat > "$override_file" <<EOF
@@ -634,7 +541,6 @@ EOF
 
     systemctl daemon-reload
     systemctl enable --now cockpit.socket
-
     register_rollback "systemctl disable --now cockpit.socket 2>/dev/null || true"
     ok "Cockpit actief op poort ${COCKPIT_PORT}."
 }
@@ -645,12 +551,7 @@ EOF
 
 create_directories() {
     info "[3/9] Mappenstructuur aanmaken..."
-    local dirs=(
-        "$TFTP_DIR"
-        "$NETBOOT_CONFIG_DIR"
-        "$DOKUWIKI_DATA_DIR"
-        "$FORGEJO_DATA_DIR"
-    )
+    local dirs=("$TFTP_DIR" "$NETBOOT_CONFIG_DIR" "$DOKUWIKI_DATA_DIR" "$FORGEJO_DATA_DIR")
     local d
     for d in "${dirs[@]}"; do
         if [[ ! -d "$d" ]]; then
@@ -661,18 +562,40 @@ create_directories() {
 
     chown -R 33:33     "$DOKUWIKI_DATA_DIR" 2>/dev/null || true
     chown -R 1000:1000 "$FORGEJO_DATA_DIR"  2>/dev/null || true
-
     ok "Mappen aangemaakt en rechten ingesteld."
 }
 
 # =============================================================================
-#  STAP 6 — DNSMASQ PROXY-DHCP
+#  STAP 6 — DNSMASQ INCLUDE + PROXY-DHCP  (punt 4)
 # =============================================================================
+
+ensure_dnsmasq_include() {
+    local conf="/etc/dnsmasq.conf"
+
+    if [[ ! -f "$conf" ]]; then
+        info "  $conf bestaat niet — aanmaken."
+        touch "$conf"
+        register_rollback "rm -f '$conf'"
+    fi
+
+    if ! grep -qE '^\s*conf-dir\s*=\s*/etc/dnsmasq\.d' "$conf"; then
+        backup_or_register_new "$conf"
+        echo "conf-dir=/etc/dnsmasq.d/,*.conf" >> "$conf"
+        ok "  conf-dir toegevoegd aan $conf."
+    else
+        ok "  $conf bevat al conf-dir=/etc/dnsmasq.d/."
+    fi
+
+    if [[ ! -d /etc/dnsmasq.d ]]; then
+        mkdir -p /etc/dnsmasq.d
+        register_rollback "rmdir /etc/dnsmasq.d 2>/dev/null || true"
+    fi
+}
 
 configure_dnsmasq() {
     info "[4/9] dnsmasq configureren als proxy-DHCP..."
 
-    check_dnsmasq_include
+    ensure_dnsmasq_include
     backup_or_register_new "$DNSMASQ_CONF"
 
     cat > "$DNSMASQ_CONF" <<EOF
@@ -703,10 +626,7 @@ EOF
 # =============================================================================
 
 firewalld_active() { systemctl is-active --quiet firewalld; }
-
-get_iface_zone() {
-    firewall-cmd --get-zone-of-interface="$1" 2>/dev/null || true
-}
+get_iface_zone() { firewall-cmd --get-zone-of-interface="$1" 2>/dev/null || true; }
 
 configure_firewall() {
     info "[5/9] Firewall configureren..."
@@ -733,15 +653,15 @@ configure_firewall() {
         register_rollback "mv -f '${zone_file}.netboot-stack.bak' '${zone_file}' && firewall-cmd --reload || true"
     fi
 
-    firewall-cmd --permanent --zone="$zone" --add-service=dhcp >/dev/null
-    firewall-cmd --permanent --zone="$zone" --add-service=tftp >/dev/null
-    firewall-cmd --permanent --zone="$zone" --add-port=4011/udp        >/dev/null
-    firewall-cmd --permanent --zone="$zone" --add-port="${NETBOOT_HTTP_PORT}/tcp"   >/dev/null
-    firewall-cmd --permanent --zone="$zone" --add-port="${NETBOOT_WEB_PORT}/tcp"    >/dev/null
-    firewall-cmd --permanent --zone="$zone" --add-port="${DOKUWIKI_PORT}/tcp"       >/dev/null
-    firewall-cmd --permanent --zone="$zone" --add-port="${FORGEJO_HTTP_PORT}/tcp"   >/dev/null
-    firewall-cmd --permanent --zone="$zone" --add-port="${FORGEJO_SSH_PORT}/tcp"    >/dev/null
-    firewall-cmd --permanent --zone="$zone" --add-port="${COCKPIT_PORT}/tcp"        >/dev/null
+    firewall-cmd --permanent --zone="$zone" --add-service=dhcp    >/dev/null
+    firewall-cmd --permanent --zone="$zone" --add-service=tftp    >/dev/null
+    firewall-cmd --permanent --zone="$zone" --add-port=4011/udp   >/dev/null
+    firewall-cmd --permanent --zone="$zone" --add-port="${NETBOOT_HTTP_PORT}/tcp" >/dev/null
+    firewall-cmd --permanent --zone="$zone" --add-port="${NETBOOT_WEB_PORT}/tcp"  >/dev/null
+    firewall-cmd --permanent --zone="$zone" --add-port="${DOKUWIKI_PORT}/tcp"     >/dev/null
+    firewall-cmd --permanent --zone="$zone" --add-port="${FORGEJO_HTTP_PORT}/tcp" >/dev/null
+    firewall-cmd --permanent --zone="$zone" --add-port="${FORGEJO_SSH_PORT}/tcp"  >/dev/null
+    firewall-cmd --permanent --zone="$zone" --add-port="${COCKPIT_PORT}/tcp"      >/dev/null
 
     firewall-cmd --reload >/dev/null
     register_rollback "firewall-cmd --reload || true"
@@ -756,9 +676,7 @@ create_quadlet_units() {
     info "[6/9] Quadlet-units aanmaken..."
     mkdir -p "$QUADLET_DIR"
 
-    # -------------------------------------------------------------------------
-    # netboot.xyz
-    # -------------------------------------------------------------------------
+    # --- netboot.xyz ---
     local unit_netboot="${QUADLET_DIR}/netbootxyz.container"
     backup_or_register_new "$unit_netboot"
     cat > "$unit_netboot" <<EOF
@@ -786,9 +704,7 @@ RestartSec=10
 WantedBy=multi-user.target
 EOF
 
-    # -------------------------------------------------------------------------
-    # DokuWiki
-    # -------------------------------------------------------------------------
+    # --- DokuWiki ---
     local unit_doku="${QUADLET_DIR}/dokuwiki.container"
     backup_or_register_new "$unit_doku"
     cat > "$unit_doku" <<EOF
@@ -812,9 +728,7 @@ RestartSec=10
 WantedBy=multi-user.target
 EOF
 
-    # -------------------------------------------------------------------------
-    # Forgejo
-    # -------------------------------------------------------------------------
+    # --- Forgejo ---
     local unit_forgejo="${QUADLET_DIR}/forgejo.container"
     backup_or_register_new "$unit_forgejo"
     cat > "$unit_forgejo" <<EOF
@@ -845,28 +759,33 @@ EOF
 }
 
 # =============================================================================
-#  STAP 9 — CONTAINERS STARTEN
+#  STAP 9 — CONTAINERS STARTEN (punt 2)
 # =============================================================================
 #
-# Containers worden gestart, maar een falende start breekt het script NIET
-# af. Waarom niet? Omdat:
-#   - de eerste pull van netboot.xyz meerdere minuten kan duren;
-#   - de gebruiker via Cockpit handmatig kan herstarten;
-#   - verify_installation() alsnog alles controleert en het eindoordeel velt.
-#
-# Wel registreren we rollback voor containers die met succes zijn gestart.
+# Containers krijgen een wachttijd. Een container die na de timeout niet
+# actief is, telt als mislukt. verify_installation() velt het eindoordeel.
+
+wait_for_service() {
+    local svc="$1" timeout="${2:-$CONTAINER_START_TIMEOUT}" waited=0
+    while (( waited < timeout )); do
+        systemctl is-active --quiet "$svc" && return 0
+        sleep 3
+        (( waited += 3 ))
+    done
+    return 1
+}
 
 start_containers() {
-    info "[7/9] Containers starten..."
+    info "[7/9] Containers starten (max ${CONTAINER_START_TIMEOUT}s elk)..."
     systemctl daemon-reload
-
     local ctr
     for ctr in netbootxyz dokuwiki forgejo; do
-        if systemctl start "${ctr}.service" 2>/dev/null; then
-            ok "  ${ctr} gestart."
+        systemctl start "${ctr}.service" 2>/dev/null || true
+        if wait_for_service "${ctr}.service" "$CONTAINER_START_TIMEOUT"; then
+            ok "  ${ctr}: actief."
             register_rollback "systemctl stop '${ctr}.service' 2>/dev/null || true"
         else
-            warn "  ${ctr} kon niet worden gestart. Bekijk: podman logs ${ctr}"
+            warn "  ${ctr}: NIET actief na ${CONTAINER_START_TIMEOUT}s."
         fi
     done
 }
@@ -874,19 +793,11 @@ start_containers() {
 # =============================================================================
 #  STAP 10 — VERIFICATIE (bepaalt de exit-code)
 # =============================================================================
-#
-# Deze functie retourneert:
-#   0 = alles draait
-#   1 = minimaal één kritieke component draait niet
-#
-# main() gebruikt deze return-waarde om te beslissen of de installatie als
-# geslaagd mag worden gerapporteerd.
 
 verify_installation() {
     info "[8/9] Installatie verifiëren..."
     local failed=0
 
-    # dnsmasq
     if systemctl is-active --quiet dnsmasq; then
         ok "  dnsmasq: actief."
     else
@@ -894,7 +805,6 @@ verify_installation() {
         failed=1
     fi
 
-    # Cockpit socket
     if systemctl is-active --quiet cockpit.socket; then
         ok "  cockpit.socket: actief op poort ${COCKPIT_PORT}."
     else
@@ -902,7 +812,6 @@ verify_installation() {
         failed=1
     fi
 
-    # Containers
     local ctr
     for ctr in netbootxyz dokuwiki forgejo; do
         if systemctl is-active --quiet "${ctr}.service"; then
@@ -913,15 +822,13 @@ verify_installation() {
         fi
     done
 
-    # TFTP-poort (kritiek voor netboot)
     if ss -ulnp 2>/dev/null | grep -q ":${NETBOOT_TFTP_PORT} "; then
         ok "  poort ${NETBOOT_TFTP_PORT}/UDP (TFTP): in gebruik."
     else
-        error "  poort ${NETBOOT_TFTP_PORT}/UDP (TFTP): NIET in gebruik — netboot.xyz container luistert niet."
+        error "  poort ${NETBOOT_TFTP_PORT}/UDP (TFTP): NIET in gebruik."
         failed=1
     fi
 
-    # HTTP-poort
     if ss -tlnp 2>/dev/null | grep -q ":${NETBOOT_HTTP_PORT} "; then
         ok "  poort ${NETBOOT_HTTP_PORT}/TCP (HTTP): in gebruik."
     else
@@ -948,17 +855,17 @@ print_summary_success() {
     echo "  Gateway        : ${SELECTED_GATEWAY:-<geen>}"
     echo
     echo "  Container-images (vastgezet):"
-    echo "    netboot.xyz  : ${NETBOOT_IMAGE}"
-    echo "    DokuWiki     : ${DOKUWIKI_IMAGE}"
-    echo "    Forgejo      : ${FORGEJO_IMAGE}"
+    echo "    netboot.xyz : ${NETBOOT_IMAGE}"
+    echo "    DokuWiki    : ${DOKUWIKI_IMAGE}"
+    echo "    Forgejo     : ${FORGEJO_IMAGE}"
     echo
     echo "  Toegang:"
-    echo "    Cockpit      : https://${SELECTED_IP}:${COCKPIT_PORT}"
-    echo "    netboot.xyz  : http://${SELECTED_IP}:${NETBOOT_HTTP_PORT}"
-    echo "    netboot UI   : http://${SELECTED_IP}:${NETBOOT_WEB_PORT}"
-    echo "    DokuWiki     : http://${SELECTED_IP}:${DOKUWIKI_PORT}"
-    echo "    Forgejo      : http://${SELECTED_IP}:${FORGEJO_HTTP_PORT}"
-    echo "    Forgejo SSH  : ssh -p ${FORGEJO_SSH_PORT} git@${SELECTED_IP}"
+    echo "    Cockpit     : https://${SELECTED_IP}:${COCKPIT_PORT}"
+    echo "    netboot.xyz : http://${SELECTED_IP}:${NETBOOT_HTTP_PORT}"
+    echo "    netboot UI  : http://${SELECTED_IP}:${NETBOOT_WEB_PORT}"
+    echo "    DokuWiki    : http://${SELECTED_IP}:${DOKUWIKI_PORT}"
+    echo "    Forgejo     : http://${SELECTED_IP}:${FORGEJO_HTTP_PORT}"
+    echo "    Forgejo SSH : ssh -p ${FORGEJO_SSH_PORT} git@${SELECTED_IP}"
     echo
     echo "  Logbestand     : ${LOG_FILE}"
     echo "------------------------------------------------------------"
@@ -998,14 +905,20 @@ print_summary_failure() {
 # =============================================================================
 
 main() {
-    print_banner
+    echo "============================================================"
+    echo "  netboot-stack installer voor openSUSE Leap"
+    echo "  Versie: ${SCRIPT_VERSION}"
+    echo "  Log:    ${LOG_FILE}"
+    echo "============================================================"
+    echo
+
     require_root
     require_opensuse_leap
     require_systemd
     require_zypper
-    ensure_ipcalc
 
-    # Stap 0: image tags valideren (VOOR alles)
+    # Stap 0: prerequisites + image tags
+    install_prerequisites
     verify_image_tags
 
     # Stap 1: netwerk kiezen + valideren
