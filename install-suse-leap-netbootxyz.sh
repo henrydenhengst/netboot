@@ -51,11 +51,11 @@
 #   │  netboot.xyz (Podman, host-network)                             │
 #   │   - TFTP-server op :69/UDP                                      │
 #   │   - HTTP-server op :80/TCP                                      │
-#   │   - Web-UI op :9000/TCP                                         │
+#   │   - Web-UI op :12080/TCP                                        │
 #   │                                                                 │
-#   │  DokuWiki (Podman)                :9001/TCP                     │
-#   │  Forgejo  (Podman)                :9002/TCP + :2002/TCP (SSH)   │
-#   │  Cockpit  (host-service)          :9003/TCP                     │
+#   │  DokuWiki (Podman)                :12081/TCP                    │
+#   │  Forgejo  (Podman)                :12082/TCP + :2222/TCP (SSH)  │
+#   │  Cockpit  (host-service)          :9090/TCP                     │
 #   └─────────────────────────────────────────────────────────────────┘
 #
 # -----------------------------------------------------------------------------
@@ -158,16 +158,20 @@
 # -----------------------------------------------------------------------------
 #  POORTEN
 # -----------------------------------------------------------------------------
-#    67/UDP   dnsmasq       Proxy-DHCP
-#    69/UDP   netboot.xyz   TFTP
-#    80/TCP   netboot.xyz   HTTP (iPXE)
-#    4011/UDP dnsmasq       Alternatieve PXE-poort
+#    67/UDP    dnsmasq       Proxy-DHCP
+#    69/UDP    netboot.xyz   TFTP
+#    80/TCP    netboot.xyz   HTTP (iPXE)
+#    4011/UDP  dnsmasq       Alternatieve PXE-poort
 #
-#    2002/TCP Forgejo       Git SSH
-#    9000/TCP netboot.xyz   Web-UI
-#    9001/TCP DokuWiki      Webinterface
-#    9002/TCP Forgejo       HTTP
-#    9003/TCP Cockpit       Dashboard
+#    2222/TCP  Forgejo       Git SSH
+#    9090/TCP  Cockpit       Dashboard
+#    12080/TCP netboot.xyz   Web-UI
+#    12081/TCP DokuWiki      Webinterface
+#    12082/TCP Forgejo       HTTP
+#
+#  De PXE-poorten (67, 69, 80, 4011) zijn vastgelegd door de PXE-standaard.
+#  De beheer-poorten zijn gekozen buiten de door bekende services gebruikte
+#  ranges (9000-9003 wordt historisch door SonarQube, Hadoop en Tor gebruikt).
 #
 # -----------------------------------------------------------------------------
 #  GEBRUIK
@@ -203,7 +207,7 @@
 #         tftp <server-ip> -c get netboot.xyz.kpxe /tmp/test.kpxe
 #   3. Test een PXE-boot vanaf een BIOS-client.
 #   4. Test een PXE-boot vanaf een UEFI-client.
-#   5. Beheer de containers via Cockpit: https://<server-ip>:9003
+#   5. Beheer de containers via Cockpit: https://<server-ip>:9090
 #
 # -----------------------------------------------------------------------------
 #  TROUBLESHOOTING
@@ -248,13 +252,16 @@ readonly QUADLET_DIR="/etc/containers/systemd"
 readonly DNSMASQ_CONF_DIR="/etc/dnsmasq.d"
 readonly DNSMASQ_CONF="${DNSMASQ_CONF_DIR}/netboot.conf"
 
+# PXE-poorten — vastgelegd door de PXE-standaard
 readonly NETBOOT_TFTP_PORT=69
 readonly NETBOOT_HTTP_PORT=80
-readonly NETBOOT_WEB_PORT=9000
-readonly DOKUWIKI_PORT=9001
-readonly FORGEJO_HTTP_PORT=9002
-readonly FORGEJO_SSH_PORT=2002
-readonly COCKPIT_PORT=9003
+
+# Beheer-poorten — gekozen buiten bekende serviceranges
+readonly NETBOOT_WEB_PORT=12080
+readonly DOKUWIKI_PORT=12081
+readonly FORGEJO_HTTP_PORT=12082
+readonly FORGEJO_SSH_PORT=2222
+readonly COCKPIT_PORT=9090
 
 readonly NETBOOT_IMAGE="ghcr.io/netbootxyz/netbootxyz:latest"
 readonly DOKUWIKI_IMAGE="docker.io/dokuwiki/dokuwiki:2024-02-06b"
@@ -805,7 +812,7 @@ configure_firewall() {
         [[ "$cont" =~ ^[jJ]$ ]] || die "Afgebroken."
     fi
 
-    warn "Beheerpoorten (9000-9003, 2002) worden op de PXE-interface geopend."
+    warn "Beheerpoorten (12080-12082, 2222, 9090) worden op de PXE-interface geopend."
 
     local zone_file="/etc/firewalld/zones/${zone}.xml"
     if [[ -f "$zone_file" ]]; then
@@ -963,11 +970,6 @@ start_containers() {
 # =============================================================================
 #  STAP 10 — EINDCONTROLES
 # =============================================================================
-#
-# Een falende eindcontrole leidt NIET tot rollback. De installatie is
-# technisch voltooid; het falen is een runtime-conditie die vaak tijdelijk
-# is. De beheerder kan de situatie live onderzoeken en zo nodig een
-# service herstarten zonder alles opnieuw te installeren.
 
 verify_installation() {
     info "[8/9] Eindcontroles uitvoeren..."
