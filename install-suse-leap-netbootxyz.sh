@@ -18,8 +18,7 @@
 #    2. netboot.xyz      - TFTP- en HTTP-bootserver in een Podman-container
 #                          (host-netwerk), inclusief web-UI.
 #    3. DokuWiki         - Documentatie-wiki in een Podman-container.
-#    4. Forgejo          - Git-forge (Git-hosting, issue-tracking) in een
-#                          Podman-container.
+#    4. Forgejo          - Git-forge in een Podman-container.
 #    5. Cockpit          - Grafisch beheer-dashboard op de host, met
 #                          Podman-integratie voor het beheren van containers.
 #
@@ -65,26 +64,24 @@
 #
 #  Proxy-DHCP in plaats van een tweede DHCP-server.
 #    Een tweede DHCP-server op hetzelfde L2-segment veroorzaakt
-#    IP-conflicten en is een klassieke netwerkfout. dnsmasq in proxy-modus
-#    antwoordt uitsluitend op PXE-verzoeken; de bestaande DHCP-server
-#    blijft verantwoordelijk voor IP-uitgifte.
+#    IP-conflicten. dnsmasq in proxy-modus antwoordt uitsluitend op
+#    PXE-verzoeken; de bestaande DHCP-server blijft verantwoordelijk voor
+#    IP-uitgifte.
 #
 #  dnsmasq doet geen TFTP.
 #    De netboot.xyz-container bevat een eigen TFTP-server op :69/UDP.
-#    Twee TFTP-servers op dezelfde poort conflicteren, dus dnsmasq
-#    beperkt zich tot proxy-DHCP.
+#    Twee TFTP-servers op dezelfde poort conflicteren.
 #
 #  netboot.xyz draait met host-netwerk.
 #    TFTP gebruikt UDP met dynamische poorten en werkt niet betrouwbaar
-#    via bridge-netwerken. Host-netwerk is de enige werkende optie.
+#    via bridge-netwerken.
 #
 #  Quadlet in plaats van `podman generate systemd`.
 #    Declaratief, systemd-native, volledig integreerbaar met Cockpit.
 #
 #  Expliciet server-IP in de pxe-service-regel.
-#    De Fritzbox geeft soms zijn eigen IP-adres als TFTP-server door aan
-#    PXE-clients. Door het server-IP expliciet op te nemen, wordt dit
-#    omzeild.
+#    De Fritzbox geeft soms zijn eigen IP-adres als TFTP-server door.
+#    Door het server-IP expliciet op te nemen, wordt dit omzeild.
 #
 # -----------------------------------------------------------------------------
 #  GEDRAG VAN HET SCRIPT
@@ -92,55 +89,38 @@
 #
 #  Veilig herhaalbaar
 #  ------------------
-#  Het script kan meerdere keren worden uitgevoerd. Bestaande
-#  configuratiebestanden krijgen een tijdgestempelde back-up
-#  (.bak.YYYYMMDD-HHMMSS) voordat ze worden overschreven. Een tweede run
-#  overschrijft dus nooit stilzwijgend een eerdere configuratie.
+#  Bestaande configuratiebestanden krijgen een tijdgestempelde back-up
+#  (.bak.YYYYMMDD-HHMMSS) voordat ze worden overschreven.
 #
 #  Bestaande data wordt beschermd
 #  ------------------------------
 #  Bij het instellen van eigenaars op de data-mappen van DokuWiki en
 #  Forgejo wordt onderscheid gemaakt tussen:
 #     * map bestaat niet       → aangemaakt, eigenaar ingesteld
-#     * map bestaat en is leeg → recursief eigenaar ingesteld (veilig)
-#     * map bestaat met inhoud → alleen top-level eigenaar aangepast;
-#                                de gebruiker wordt gewaarschuwd dat
-#                                recursieve aanpassing handmatig moet
-#                                gebeuren indien nodig
+#     * map bestaat en is leeg → recursief eigenaar ingesteld
+#     * map bestaat met inhoud → alleen top-level eigenaar aangepast,
+#                                met waarschuwing
 #
 #  Rollback bij fouten tijdens installatie
 #  ---------------------------------------
 #  Alle wijzigingen tijdens de installatie worden vastgelegd in een
 #  rollback-stack. Bij een fatale fout wordt de stack in omgekeerde
-#  volgorde uitgevoerd: bestanden worden teruggezet, mappen verwijderd,
-#  services in hun oorspronkelijke staat hersteld en firewall-regels
-#  teruggedraaid. Rollback-acties zijn getypeerd (geen eval), zodat
-#  onverwachte shell-interpretatie onmogelijk is.
+#  volgorde uitgevoerd. Rollback-acties zijn getypeerd; geen eval.
 #
 #  Service-state wordt gerespecteerd
 #  ---------------------------------
 #  Voordat het script een service aanraakt, wordt vastgelegd of die
 #  daarvoor al enabled en/of actief was. Bij rollback worden alleen de
-#  wijzigingen teruggedraaid die deze run zelf heeft aangebracht. Een
-#  service die vóór de installatie al draaide, wordt niet uitgeschakeld.
+#  wijzigingen teruggedraaid die deze run zelf heeft aangebracht.
 #
 #  Onderscheid tussen fouten tijdens installatie en mislukte eindcontrole
 #  ----------------------------------------------------------------------
-#  Het script maakt expliciet onderscheid tussen twee soorten falen:
-#
 #    Fatale fout tijdens installatie
-#      Het script stopt onmiddellijk, voert rollback uit en eindigt met
-#      exit-code 1. Dit gebeurt bijvoorbeeld wanneer een package niet
-#      kan worden geïnstalleerd, een container niet start of een
-#      configuratie ongeldig blijkt.
-#
+#      Het script stopt, voert rollback uit, exit-code 1.
 #    Mislukte eindcontrole
-#      De installatie is technisch voltooid, maar een runtime-conditie
-#      wordt niet gehaald (bijvoorbeeld een container die nog niet klaar
-#      is, of een tijdelijke netwerkstoring). Het script voert dan GEEN
-#      rollback uit, zodat de beheerder de situatie live kan onderzoeken,
-#      en eindigt met exit-code 2. De installatie blijft staan; een
-#      herstart van de betreffende service is meestal voldoende.
+#      Installatie is technisch klaar, runtime-conditie faalt.
+#      GEEN rollback, exit-code 2. De installatie blijft staan zodat je
+#      de situatie kunt onderzoeken.
 #
 #  Exit-codes
 #  ----------
@@ -155,10 +135,10 @@
 #    * of alle services (dnsmasq, cockpit.socket, firewalld) actief zijn
 #    * of alle containers (netbootxyz, dokuwiki, forgejo) actief zijn
 #    * of de dnsmasq-configuratie syntactisch geldig is
-#    * of poort 69/UDP (TFTP) en poort 80/TCP (HTTP) luisteren
+#    * of poort 69/UDP en poort 80/TCP luisteren
 #    * of de HTTP-root een niet-lege body teruggeeft
-#    * of de bestanden netboot.xyz.kpxe en netboot.xyz.efi via TFTP
-#      kunnen worden opgehaald
+#    * of netboot.xyz.kpxe en netboot.xyz.efi via TFTP opgehaald kunnen
+#      worden
 #
 #  Een succesvolle eindcontrole bewijst dat de server klaar is voor
 #  PXE-clients. Het bewijst niet dat een specifieke client de volledige
@@ -189,41 +169,36 @@
 #    9002/TCP Forgejo       HTTP
 #    9003/TCP Cockpit       Dashboard
 #
-#  De PXE-poorten zijn noodzakelijk voor het functioneren van de
-#  netboot-omgeving. De beheer-poorten worden op dezelfde interface
-#  geopend; overweeg of dat in jouw omgeving wenselijk is.
-#
 # -----------------------------------------------------------------------------
 #  GEBRUIK
 # -----------------------------------------------------------------------------
 #   sudo ./netboot-stack-installer.sh
 #
 #  Het script is interactief: het toont de beschikbare netwerkinterfaces
-#  en vraagt de gebruiker welke interface op het PXE-netwerk is
-#  aangesloten. Daarna toont het de berekende netwerkgegevens en vraagt
-#  om bevestiging voordat de installatie begint.
+#  en vraagt welke interface op het PXE-netwerk is aangesloten. Daarna
+#  toont het de berekende netwerkgegevens en vraagt om bevestiging.
 #
 # -----------------------------------------------------------------------------
 #  CONTAINER-IMAGES
 # -----------------------------------------------------------------------------
-#  De gebruikte images zijn vastgezet op expliciete versietags, zodat
-#  installaties reproduceerbaar zijn. Om beschikbare tags te bekijken:
+#  DokuWiki en Forgejo zijn vastgezet op expliciete versietags, zodat deze
+#  componenten reproduceerbaar zijn. De netboot.xyz-image gebruikt de tag
+#  `latest`, omdat de officiële ghcr.io-registry geen nette release-tags
+#  publiceert. netboot.xyz bewaart geen data in de container zelf; een
+#  nieuwe versie kan zonder verlies worden teruggedraaid.
 #
-#     skopeo list-tags docker://ghcr.io/netbootxyz/netbootxyz
+#  Voordat het script de containers aanmaakt, controleert het met skopeo
+#  of alle tags bereikbaar zijn.
+#
+#  Beschikbare tags bekijken:
 #     skopeo list-tags docker://docker.io/dokuwiki/dokuwiki
 #     skopeo list-tags docker://codeberg.org/forgejo/forgejo
-#
-#  Voordat het script de containers aanmaakt, controleert het of alle
-#  tags bestaan. Als een tag niet wordt gevonden, stopt het script met
-#  een duidelijke melding — er wordt geen poging gedaan om een andere
-#  versie te gebruiken.
+#     skopeo list-tags docker://ghcr.io/netbootxyz/netbootxyz
 #
 # -----------------------------------------------------------------------------
 #  NA INSTALLATIE
 # -----------------------------------------------------------------------------
-#   1. Zet het server-IP vast in de bestaande DHCP-server (bijv. Fritzbox:
-#      "Diesem Netzwerkgerät immer die gleiche IPv4-Adresse zuweisen").
-#      Zonder DHCP-reservering kan het IP veranderen na een reboot.
+#   1. Zet het server-IP vast in de bestaande DHCP-server.
 #   2. Test TFTP lokaal:
 #         tftp <server-ip> -c get netboot.xyz.kpxe /tmp/test.kpxe
 #   3. Test een PXE-boot vanaf een BIOS-client.
@@ -235,22 +210,18 @@
 # -----------------------------------------------------------------------------
 #
 #  "TFTP timeout" op de client
-#       ss -ulnp | grep :69          (container moet luisteren)
-#       podman logs netbootxyz       (container-logs)
-#       firewall-cmd --list-all      (firewall-regels)
+#       ss -ulnp | grep :69
+#       podman logs netbootxyz
+#       firewall-cmd --list-all
 #
 #  "no boot filename" op de client
-#       journalctl -u dnsmasq -f     (proxy-DHCP antwoordt niet)
+#       journalctl -u dnsmasq -f
 #       Controleer interface= in /etc/dnsmasq.d/netboot.conf
-#
-#  Client probeert te booten van het IP van de DHCP-server
-#       Controleer of de pxe-service-regel in /etc/dnsmasq.d/netboot.conf
-#       eindigt met ,$SERVER_IP
 #
 #  Container start niet
 #       systemctl status <naam>.service
 #       podman logs <naam>
-#       ss -tlnp                     (poortconflict?)
+#       ss -tlnp
 #
 #  firewalld start niet of zone ontbreekt
 #       systemctl status firewalld
@@ -285,9 +256,9 @@ readonly FORGEJO_HTTP_PORT=9002
 readonly FORGEJO_SSH_PORT=2002
 readonly COCKPIT_PORT=9003
 
-readonly NETBOOT_IMAGE="ghcr.io/netbootxyz/netbootxyz:0.7.5"
+readonly NETBOOT_IMAGE="ghcr.io/netbootxyz/netbootxyz:latest"
 readonly DOKUWIKI_IMAGE="docker.io/dokuwiki/dokuwiki:2024-02-06b"
-readonly FORGEJO_IMAGE="codeberg.org/forgejo/forgejo:12.0.1"
+readonly FORGEJO_IMAGE="codeberg.org/forgejo/forgejo:16.0"
 
 readonly TFTP_DIR="/srv/tftp"
 readonly NETBOOT_CONFIG_DIR="/srv/netboot-config"
@@ -1060,7 +1031,7 @@ print_summary_success() {
     echo "  Netmasker      : ${SELECTED_NETMASK}"
     echo "  Gateway        : ${SELECTED_GATEWAY:-<geen>}"
     echo
-    echo "  Container-images (vastgezet):"
+    echo "  Container-images:"
     echo "    netboot.xyz : ${NETBOOT_IMAGE}"
     echo "    DokuWiki    : ${DOKUWIKI_IMAGE}"
     echo "    Forgejo     : ${FORGEJO_IMAGE}"
@@ -1127,7 +1098,6 @@ print_summary_failure() {
 main() {
     echo "============================================================"
     echo "  netboot-stack installer voor openSUSE Leap"
-    echo "  Versie: ${SCRIPT_VERSION}"
     echo "  Log:    ${LOG_FILE}"
     echo "============================================================"
     echo
