@@ -1,17 +1,21 @@
 #!/usr/bin/env bash
 # =============================================================================
-#  NETBOOTXYZ FIX — Network=host → PublishPort
+#  FIX DOKUWIKI — poortmapping 12081:80 → 12081:8080
 # =============================================================================
-#  Diagnosticeert waarom poort 69/80 niet luisteren, past de Quadlet-config
-#  aan, herstart de container en verifieert.
+#  Past de Quadlet-configuratie van DokuWiki aan zodat de container op de
+#  juiste interne poort (8080) wordt gepubliceerd, herstart de container en
+#  verifieert dat de webinterface bereikbaar is.
 #
-#  Gebruik:  sudo ./fix-netbootxyz.sh
+#  Gebruik:  sudo ./fix-dokuwiki.sh
 # =============================================================================
 
 set -uo pipefail
 
-QUADLET_FILE="/etc/containers/systemd/netbootxyz.container"
+QUADLET_FILE="/etc/containers/systemd/dokuwiki.container"
 BACKUP="${QUADLET_FILE}.bak.$(date +%Y%m%d-%H%M%S)"
+HOST_PORT=12081
+CONTAINER="dokuwiki"
+DATA_DIR="/srv/dokuwiki/data"
 
 if [[ $EUID -ne 0 ]]; then
     echo "Root vereist: sudo $0" >&2
@@ -25,155 +29,149 @@ if [[ ! -f "$QUADLET_FILE" ]]; then
 fi
 
 echo "============================================================"
-echo "  STAP 1 — DIAGNOSE"
+echo "  FIX DOKUWIKI — $(date '+%Y-%m-%d %H:%M:%S')"
 echo "============================================================"
 echo
 
-echo "--- Huidige Quadlet-config ---"
-grep -E '^(Network|PublishPort|Environment|Image)' "$QUADLET_FILE" | sed 's/^/  /'
+# -----------------------------------------------------------------------------
+# 1. Huidige staat
+# -----------------------------------------------------------------------------
+echo "--- Huidige Quadlet-config (poortregel) ---"
+grep -E '^PublishPort' "$QUADLET_FILE" | sed 's/^/  /'
 echo
 
-echo "--- Draaiende containers ---"
-podman ps -a --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}' | sed 's/^/  /'
+echo "--- Huidige poortmapping in Podman ---"
+podman port "$CONTAINER" 2>/dev/null | sed 's/^/  /' || echo "  (container niet actief of geen mapping)"
 echo
 
-echo "--- Poort 80 (TCP) ---"
-ss -tlnp 2>/dev/null | grep -E ':(80|12080) ' | sed 's/^/  /' || echo "  (niets)"
-echo
-
-echo "--- Poort 69 (UDP) ---"
-ss -ulnp 2>/dev/null | grep -E ':(69) ' | sed 's/^/  /' || echo "  (niets)"
-echo
-
-echo "--- Container-logs (laatste 25 regels) ---"
-podman logs netbootxyz 2>&1 | tail -25 | sed 's/^/  /' || echo "  (geen logs)"
-echo
-
-echo "--- Container inspect: poortbindingen ---"
-podman inspect netbootxyz --format '{{json .HostConfig.PortBindings}}' 2>/dev/null | sed 's/^/  /' || echo "  (niet beschikbaar)"
-echo
-
-echo "--- Container inspect: netwerkmodus ---"
-podman inspect netbootxyz --format '{{.HostConfig.NetworkMode}}' 2>/dev/null | sed 's/^/  /' || echo "  (niet beschikbaar)"
-echo
-
-echo "============================================================"
-echo "  STAP 2 — FIX TOEPASSEN"
-echo "============================================================"
-
-if ! grep -q '^Network=host' "$QUADLET_FILE"; then
-    echo "Network=host staat niet in de file — de fix is mogelijk al toegepast."
-    echo "Wil je de configuratie alsnog overschrijven met de PublishPort-versie?"
-    read -rp "Doorgaan? (j/n): " cont
-    [[ "$cont" =~ ^[jJ]$ ]] || { echo "Afgebroken."; exit 0; }
+# -----------------------------------------------------------------------------
+# 2. Bepaal of fix nodig is
+# -----------------------------------------------------------------------------
+if grep -q '^PublishPort=12081:8080' "$QUADLET_FILE"; then
+    echo "Configuratie is al correct (12081:8080). Alleen herstarten."
+    NEEDS_PATCH=0
 else
-    echo "Network=host gevonden — fix wordt toegepast."
-    read -rp "Doorgaan? (j/n): " cont
-    [[ "$cont" =~ ^[jJ]$ ]] || { echo "Afgebroken."; exit 0; }
+    echo "Configuratie moet worden aangepast naar 12081:8080."
+    NEEDS_PATCH=1
 fi
-
 echo
-echo "Back-up: $BACKUP"
-cp -a "$QUADLET_FILE" "$BACKUP"
 
-echo "Nieuwe configuratie schrijven..."
-cat > "$QUADLET_FILE" <<'EOF'
-[Unit]
-Description=netboot.xyz (TFTP + HTTP)
-Documentation=https://netboot.xyz
-After=network-online.target
-Wants=network-online.target
+read -rp "Doorgaan met de fix? (j/n): " cont
+[[ "$cont" =~ ^[jJ]$ ]] || { echo "Afgebroken."; exit 0; }
+echo
 
-[Container]
-Image=ghcr.io/netbootxyz/netbootxyz:latest
-ContainerName=netbootxyz
-PublishPort=69:69/udp
-PublishPort=80:80
-PublishPort=12080:3000
-Volume=/srv/tftp:/assets:Z
-Volume=/srv/netboot-config:/config:Z
-Environment=TFTPD_OPTS=--tftp-single-port
+# -----------------------------------------------------------------------------
+# 3. Back-up en patch
+# -----------------------------------------------------------------------------
+if (( NEEDS_PATCH == 1 )); then
+    echo "Back-up: $BACKUP"
+    cp -a "$QUADLET_FILE" "$BACKUP"
 
-[Service]
-Restart=always
-RestartSec=10
+    echo "Poortregel aanpassen..."
+    sed -i 's|^PublishPort=12081:80$|PublishPort=12081:8080|' "$QUADLET_FILE"
 
-[Install]
-WantedBy=multi-user.target
-EOF
+    if ! grep -q '^PublishPort=12081:8080' "$QUADLET_FILE"; then
+        echo "✗ Aanpassen mislukt. Herstel de back-up handmatig:" >&2
+        echo "  cp -a '$BACKUP' '$QUADLET_FILE'" >&2
+        exit 1
+    fi
+    echo "✓ Configuratie aangepast."
+else
+    echo "Geen patch nodig."
+fi
+echo
 
-echo "Container stoppen en verwijderen..."
-systemctl stop netbootxyz.service 2>/dev/null || true
-podman rm -f netbootxyz 2>/dev/null || true
+# -----------------------------------------------------------------------------
+# 4. Container verwijderen en opnieuw aanmaken
+# -----------------------------------------------------------------------------
+echo "Container stoppen..."
+systemctl stop dokuwiki.service 2>/dev/null || true
 
-echo "Systemd herladen..."
+echo "Container verwijderen (data blijft behouden)..."
+podman rm -f "$CONTAINER" 2>/dev/null || true
+
+echo "Data-map eigenaar corrigeren..."
+if [[ -d "$DATA_DIR" ]]; then
+    chown -R 33:33 "$DATA_DIR"
+    echo "  ✓ $DATA_DIR → 33:33"
+else
+    echo "  ⚠ $DATA_DIR bestaat niet — wordt aangemaakt bij eerste start."
+fi
+echo
+
+echo "Systemd herladen en container starten..."
 systemctl daemon-reload
-
-echo "Container starten..."
-systemctl start netbootxyz.service
+systemctl start dokuwiki.service
 
 echo
-echo "Wachten tot de container is opgestart (15s)..."
-sleep 15
+echo "Wachten tot DokuWiki is geïnitialiseerd (25s)..."
+sleep 25
 
+# -----------------------------------------------------------------------------
+# 5. Verifiëren
+# -----------------------------------------------------------------------------
 echo
 echo "============================================================"
-echo "  STAP 3 — VERIFICATIE"
+echo "  VERIFICATIE"
 echo "============================================================"
 echo
 
 echo "--- Container-status ---"
-podman ps --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}' | sed 's/^/  /'
+podman ps --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}' | grep -E "^(NAMES|${CONTAINER})" | sed 's/^/  /'
 echo
 
-echo "--- Poort 80 (TCP) ---"
-if ss -tlnp 2>/dev/null | grep -qE ':80 '; then
-    echo "  ✓ poort 80 luistert"
-    ss -tlnp | grep ':80 ' | sed 's/^/  /'
+echo "--- Poortmapping ---"
+podman port "$CONTAINER" 2>/dev/null | sed 's/^/  /' || echo "  (geen mapping)"
+echo
+
+echo "--- Poort luistert op host ---"
+if ss -tlnp 2>/dev/null | grep -q ":${HOST_PORT} "; then
+    echo "  ✓ poort ${HOST_PORT} luistert"
 else
-    echo "  ✗ poort 80 luistert NIET"
+    echo "  ✗ poort ${HOST_PORT} luistert NIET"
 fi
 echo
 
-echo "--- Poort 69 (UDP) ---"
-if ss -ulnp 2>/dev/null | grep -qE ':69 '; then
-    echo "  ✓ poort 69 luistert"
-    ss -ulnp | grep ':69 ' | sed 's/^/  /'
+echo "--- Lokale HTTP-test ---"
+if curl -fsS --max-time 5 "http://127.0.0.1:${HOST_PORT}/" >/dev/null 2>&1; then
+    echo "  ✓ HTTP op 127.0.0.1:${HOST_PORT} antwoordt"
+    HTTP_OK=1
 else
-    echo "  ✗ poort 69 luistert NIET"
+    echo "  ✗ HTTP op 127.0.0.1:${HOST_PORT} antwoordt NIET"
+    HTTP_OK=0
 fi
 echo
 
-echo "--- HTTP-test ---"
-if curl -fsS --max-time 5 "http://127.0.0.1/" >/dev/null 2>&1; then
-    echo "  ✓ HTTP root antwoordt"
-else
-    echo "  ✗ HTTP root antwoordt NIET"
-fi
-echo
-
-echo "--- TFTP-test ---"
-if curl -fsS --max-time 10 "tftp://127.0.0.1/netboot.xyz.kpxe" -o /tmp/test.kpxe 2>/dev/null \
-    && [[ -s /tmp/test.kpxe ]]; then
-    echo "  ✓ netboot.xyz.kpxe opgehaald ($(stat -c%s /tmp/test.kpxe) bytes)"
-    rm -f /tmp/test.kpxe
-else
-    echo "  ✗ netboot.xyz.kpxe niet opgehaald"
-fi
-echo
-
-echo "--- Container-logs (laatste 15 regels) ---"
-podman logs netbootxyz 2>&1 | tail -15 | sed 's/^/  /'
-echo
-
-echo "============================================================"
-if ss -tlnp 2>/dev/null | grep -qE ':80 ' && ss -ulnp 2>/dev/null | grep -qE ':69 '; then
-    echo "  RESULTAAT: GESLAAGD — poort 69 en 80 luisteren."
+# -----------------------------------------------------------------------------
+# 6. Resultaat
+# -----------------------------------------------------------------------------
+if (( HTTP_OK == 1 )); then
+    echo "============================================================"
+    echo "  RESULTAAT: GESLAAGD"
+    echo "============================================================"
+    echo "  DokuWiki is bereikbaar op:"
+    echo "    http://<server-ip>:${HOST_PORT}/"
+    echo
+    echo "  Open in je browser en rond de installatie-wizard af."
     echo "============================================================"
     exit 0
 else
-    echo "  RESULTAAT: MISLUKT — poort 69 en/of 80 luisteren niet."
-    echo "  Plak de output hierboven; de containerlogs wijzen de oorzaak aan."
+    echo "============================================================"
+    echo "  RESULTAAT: MISLUKT"
+    echo "============================================================"
+    echo "  Poort luistert niet of HTTP antwoordt niet."
+    echo
+    echo "  Container-logs (laatste 30 regels):"
+    podman logs "$CONTAINER" 2>&1 | tail -30 | sed 's/^/    /'
+    echo
+    echo "  Onderzoek:"
+    echo "    sudo podman inspect $CONTAINER --format '{{json .Config.ExposedPorts}}'"
+    echo "    sudo cat $QUADLET_FILE"
+    echo "    sudo ss -tlnp | grep :${HOST_PORT}"
+    echo
+    echo "  Handmatig terugrollen:"
+    echo "    cp -a '$BACKUP' '$QUADLET_FILE'"
+    echo "    sudo systemctl daemon-reload"
     echo "============================================================"
     exit 1
 fi
