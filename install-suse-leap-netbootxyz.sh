@@ -78,6 +78,11 @@
 #    als root, en met TFTPD_OPTS=--tftp-single-port blijft al het
 #    TFTP-verkeer op poort 69 — dat werkt betrouwbaar via port mapping.
 #
+#  DokuWiki mapt op poort 8080, niet op poort 80.
+#    De officiële dokuwiki/dokuwiki image luistert intern op poort 8080.
+#    Een mapping naar poort 80 levert een container op die draait maar
+#    niet antwoordt. Daarom: PublishPort=12081:8080.
+#
 #  Quadlet in plaats van `podman generate systemd`.
 #    Declaratief, systemd-native, volledig integreerbaar met Cockpit.
 #
@@ -231,6 +236,11 @@
 #       systemctl status <naam>.service
 #       podman ps -a
 #       podman logs <naam>
+#
+#  DokuWiki antwoordt niet op 12081
+#       sudo podman inspect dokuwiki --format '{{json .Config.ExposedPorts}}'
+#       Verwacht: {"8080/tcp":{}}
+#       Controleer PublishPort in /etc/containers/systemd/dokuwiki.container
 #
 #  Quadlet-unit start niet
 #       systemctl daemon-reload
@@ -912,8 +922,11 @@ WantedBy=multi-user.target
 EOF
 
     # -------------------------------------------------------------------------
-    # DokuWiki
+    # DokuWiki — interne poort 8080, niet 80
     # -------------------------------------------------------------------------
+    # De officiële dokuwiki/dokuwiki image luistert intern op poort 8080.
+    # Een mapping naar poort 80 levert een container op die draait maar
+    # niet antwoordt. Daarom: PublishPort=12081:8080.
     local unit_doku="${QUADLET_DIR}/dokuwiki.container"
     backup_or_register_new "$unit_doku"
     cat > "$unit_doku" <<EOF
@@ -926,7 +939,7 @@ Wants=network-online.target
 [Container]
 Image=${DOKUWIKI_IMAGE}
 ContainerName=dokuwiki
-PublishPort=${DOKUWIKI_PORT}:80
+PublishPort=${DOKUWIKI_PORT}:8080
 Volume=${DOKUWIKI_DATA_DIR}:/storage:Z
 
 [Service]
