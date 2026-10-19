@@ -15,8 +15,8 @@
 #
 #    1. dnsmasq          - Proxy-DHCP: antwoordt uitsluitend op PXE-verzoeken,
 #                          geeft zelf geen IP-adressen uit.
-#    2. netboot.xyz      - TFTP- en HTTP-bootserver in een Podman-container
-#                          (host-netwerk), inclusief web-UI.
+#    2. netboot.xyz      - TFTP- en HTTP-bootserver in een Podman-container,
+#                          inclusief web-UI.
 #    3. DokuWiki         - Documentatie-wiki in een Podman-container.
 #    4. Forgejo          - Git-forge in een Podman-container.
 #    5. Cockpit          - Grafisch beheer-dashboard op de host, met
@@ -48,7 +48,7 @@
 #   │   - Geeft geen IP-adressen uit                                  │
 #   │   - Verwijst clients naar de netboot.xyz-container              │
 #   │                                                                 │
-#   │  netboot.xyz (Podman, host-network)                             │
+#   │  netboot.xyz (Podman, PublishPort)                              │
 #   │   - TFTP-server op :69/UDP                                      │
 #   │   - HTTP-server op :80/TCP                                      │
 #   │   - Web-UI op :12080/TCP                                        │
@@ -72,9 +72,11 @@
 #    De netboot.xyz-container bevat een eigen TFTP-server op :69/UDP.
 #    Twee TFTP-servers op dezelfde poort conflicteren.
 #
-#  netboot.xyz draait met host-netwerk.
-#    TFTP gebruikt UDP met dynamische poorten en werkt niet betrouwbaar
-#    via bridge-netwerken.
+#  netboot.xyz gebruikt PublishPort in plaats van host-netwerk.
+#    De container draait als niet-root en kan daardoor niet zelf op
+#    poorten onder 1024 binden. Met PublishPort doet Podman de binding
+#    als root, en met TFTPD_OPTS=--tftp-single-port blijft al het
+#    TFTP-verkeer op poort 69 — dat werkt betrouwbaar via port mapping.
 #
 #  Quadlet in plaats van `podman generate systemd`.
 #    Declaratief, systemd-native, volledig integreerbaar met Cockpit.
@@ -875,6 +877,13 @@ create_quadlet_units() {
     info "[6/9] Quadlet-units aanmaken..."
     mkdir -p "$QUADLET_DIR"
 
+    # -------------------------------------------------------------------------
+    # netboot.xyz — TFTP + HTTP + web UI via PublishPort
+    # -------------------------------------------------------------------------
+    # De container draait als niet-root en kan niet zelf op poorten onder
+    # 1024 binden. Met PublishPort doet Podman de binding als root. Met
+    # TFTPD_OPTS=--tftp-single-port blijft al het TFTP-verkeer op poort 69,
+    # wat betrouwbaar werkt via port mapping.
     local unit_netboot="${QUADLET_DIR}/netbootxyz.container"
     backup_or_register_new "$unit_netboot"
     cat > "$unit_netboot" <<EOF
@@ -887,12 +896,12 @@ Wants=network-online.target
 [Container]
 Image=${NETBOOT_IMAGE}
 ContainerName=netbootxyz
-Network=host
+PublishPort=${NETBOOT_TFTP_PORT}:69/udp
+PublishPort=${NETBOOT_HTTP_PORT}:80
+PublishPort=${NETBOOT_WEB_PORT}:3000
 Volume=${TFTP_DIR}:/assets:Z
 Volume=${NETBOOT_CONFIG_DIR}:/config:Z
 Environment=TFTPD_OPTS=--tftp-single-port
-Environment=WEB_APP_PORT=${NETBOOT_WEB_PORT}
-Environment=NGINX_PORT=${NETBOOT_HTTP_PORT}
 
 [Service]
 Restart=always
@@ -902,6 +911,9 @@ RestartSec=10
 WantedBy=multi-user.target
 EOF
 
+    # -------------------------------------------------------------------------
+    # DokuWiki
+    # -------------------------------------------------------------------------
     local unit_doku="${QUADLET_DIR}/dokuwiki.container"
     backup_or_register_new "$unit_doku"
     cat > "$unit_doku" <<EOF
@@ -925,6 +937,9 @@ RestartSec=10
 WantedBy=multi-user.target
 EOF
 
+    # -------------------------------------------------------------------------
+    # Forgejo
+    # -------------------------------------------------------------------------
     local unit_forgejo="${QUADLET_DIR}/forgejo.container"
     backup_or_register_new "$unit_forgejo"
     cat > "$unit_forgejo" <<EOF
