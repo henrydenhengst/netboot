@@ -246,7 +246,6 @@ IFS=$'\n\t'
 # =============================================================================
 
 readonly SCRIPT_NAME="$(basename "$0")"
-readonly SCRIPT_VERSION="4.0.0"
 readonly LOG_FILE="/var/log/netboot-stack-install.log"
 readonly QUADLET_DIR="/etc/containers/systemd"
 readonly DNSMASQ_CONF_DIR="/etc/dnsmasq.d"
@@ -318,27 +317,48 @@ error() { _log ERROR "$@"; }
 #  ROLLBACK — GETYPEERDE ACTIES (geen eval)
 # =============================================================================
 
-register_rollback_file()          { RB_TYPE+=("restore_file");    RB_ARG1+=("$1"); RB_ARG2+=("$2"); }
-register_rollback_remove()        { RB_TYPE+=("remove_path");     RB_ARG1+=("$1"); RB_ARG2+=("");   }
-register_rollback_service()       { RB_TYPE+=("restore_service"); RB_ARG1+=("$1"); RB_ARG2+=("");   }
-register_rollback_owner()         { RB_TYPE+=("restore_owner");   RB_ARG1+=("$1"); RB_ARG2+=("$2"); }
-register_rollback_reload_fw()     { RB_TYPE+=("reload_firewall"); RB_ARG1+=("");   RB_ARG2+=("");   }
-register_rollback_daemon_reload() { RB_TYPE+=("daemon_reload");   RB_ARG1+=("");   RB_ARG2+=("");   }
+register_rollback_file()          { RB_TYPE+=("restore_file");    RB_ARG1+=("${1:-}"); RB_ARG2+=("${2:-}"); }
+register_rollback_remove()        { RB_TYPE+=("remove_path");     RB_ARG1+=("${1:-}"); RB_ARG2+=("");       }
+register_rollback_service()       { RB_TYPE+=("restore_service"); RB_ARG1+=("${1:-}"); RB_ARG2+=("");       }
+register_rollback_owner()         { RB_TYPE+=("restore_owner");   RB_ARG1+=("${1:-}"); RB_ARG2+=("${2:-}"); }
+register_rollback_reload_fw()     { RB_TYPE+=("reload_firewall"); RB_ARG1+=("");       RB_ARG2+=("");       }
+register_rollback_daemon_reload() { RB_TYPE+=("daemon_reload");   RB_ARG1+=("");       RB_ARG2+=("");       }
 
+# Legt de enabled/active-status van een service vast VOORDAT die wordt
+# aangeraakt. Guard tegen lege servicenaam: zonder deze guard kan een
+# rollback-actie met een lege waarde de associatieve array-index
+# corrumperen ("bad array subscript").
 record_service_state() {
-    local svc="$1" was_enabled=0 was_active=0
-    systemctl is-enabled --quiet "$svc" 2>/dev/null && was_enabled=1
-    systemctl is-active  --quiet "$svc" 2>/dev/null && was_active=1
+    local svc="${1:-}"
+    if [[ -z "$svc" ]]; then
+        return 0
+    fi
+    local was_enabled=0 was_active=0
+    systemctl is-enabled --quiet "$svc" 2>/dev/null && was_enabled=1 || true
+    systemctl is-active  --quiet "$svc" 2>/dev/null && was_active=1  || true
     SERVICE_STATE["$svc"]="$was_enabled:$was_active"
     info "  State ${svc}: enabled=${was_enabled} active=${was_active}"
 }
 
+# Herstelt de vastgelegde staat. Guard tegen lege servicenaam en
+# tegen een ontbrekende state-entry.
 restore_service_state() {
-    local svc="$1" state="${SERVICE_STATE[$svc]:-}"
-    [[ -z "$state" ]] && return 0
-    local was_enabled="${state%:*}" was_active="${state#*:}"
-    (( was_enabled == 0 )) && systemctl disable "$svc" 2>/dev/null || true
-    (( was_active  == 0 )) && systemctl stop    "$svc" 2>/dev/null || true
+    local svc="${1:-}"
+    if [[ -z "$svc" ]]; then
+        return 0
+    fi
+    local state="${SERVICE_STATE[$svc]:-}"
+    if [[ -z "$state" ]]; then
+        return 0
+    fi
+    local was_enabled="${state%:*}"
+    local was_active="${state#*:}"
+    if (( was_enabled == 0 )); then
+        systemctl disable "$svc" 2>/dev/null || true
+    fi
+    if (( was_active == 0 )); then
+        systemctl stop "$svc" 2>/dev/null || true
+    fi
 }
 
 perform_rollback() {
@@ -350,23 +370,23 @@ perform_rollback() {
     info "Rollback gestart (${#RB_TYPE[@]} acties)..."
     local idx
     for (( idx=${#RB_TYPE[@]}-1; idx>=0; idx-- )); do
-        local t="${RB_TYPE[$idx]}" a1="${RB_ARG1[$idx]}" a2="${RB_ARG2[$idx]}"
+        local t="${RB_TYPE[$idx]:-}" a1="${RB_ARG1[$idx]:-}" a2="${RB_ARG2[$idx]:-}"
         case "$t" in
             restore_file)
-                if [[ -f "$a2" ]]; then
+                if [[ -n "$a1" && -n "$a2" && -f "$a2" ]]; then
                     cp -a "$a2" "$a1" && info "  Bestand hersteld: $a1"
                 fi ;;
             remove_path)
-                if [[ -d "$a1" ]]; then
+                if [[ -n "$a1" && -d "$a1" ]]; then
                     rmdir "$a1" 2>/dev/null && info "  Map verwijderd: $a1"
-                elif [[ -e "$a1" ]]; then
+                elif [[ -n "$a1" && -e "$a1" ]]; then
                     rm -f "$a1" && info "  Bestand verwijderd: $a1"
                 fi ;;
             restore_service)
-                info "  Service-state herstellen: $a1"
+                info "  Service-state herstellen: ${a1:-<leeg>}"
                 restore_service_state "$a1" ;;
             restore_owner)
-                if [[ -e "$a1" && -n "$a2" ]]; then
+                if [[ -n "$a1" && -n "$a2" && -e "$a1" ]]; then
                     chown "$a2" "$a1" 2>/dev/null && info "  Eigenaar hersteld: $a1 → $a2"
                 fi ;;
             reload_firewall)
@@ -374,7 +394,7 @@ perform_rollback() {
             daemon_reload)
                 systemctl daemon-reload && info "  systemd daemon-reload" ;;
             *)
-                warn "  Onbekende rollback-actie: $t" ;;
+                warn "  Onbekende rollback-actie: ${t:-<leeg>}" ;;
         esac
     done
     RB_TYPE=(); RB_ARG1=(); RB_ARG2=()
@@ -412,7 +432,10 @@ trap '_on_interrupt' INT TERM
 command_exists() { command -v "$1" >/dev/null 2>&1; }
 
 backup_or_register_new() {
-    local file="$1"
+    local file="${1:-}"
+    if [[ -z "$file" ]]; then
+        return 0
+    fi
     if [[ -e "$file" ]]; then
         local backup="${file}.bak.$(date +%Y%m%d-%H%M%S)"
         cp -a "$file" "$backup"
@@ -565,7 +588,7 @@ validate_interface() {
     [[ -n "$netmask" && -n "$network" ]] \
         || die "Netwerkadres of netmasker kon niet worden berekend."
 
-    local gateway
+    local gateway=""
     gateway="$(ip route show default dev "$iface" 2>/dev/null \
         | awk '/default/ {print $3; exit}')"
 
@@ -793,8 +816,8 @@ ensure_firewalld() {
 configure_firewall() {
     info "[5/9] Firewall configureren..."
 
-    local zone
-    zone="$(firewall-cmd --get-zone-of-interface="$SELECTED_IFACE" 2>/dev/null)"
+    local zone=""
+    zone="$(firewall-cmd --get-zone-of-interface="$SELECTED_IFACE" 2>/dev/null || true)"
 
     if [[ -z "$zone" || "$zone" == "no zone" ]]; then
         error "Interface ${SELECTED_IFACE} is niet aan een firewalld-zone toegewezen."
@@ -929,7 +952,10 @@ EOF
 # =============================================================================
 
 wait_for_service() {
-    local svc="$1" timeout="${2:-$CONTAINER_START_TIMEOUT}" waited=0
+    local svc="${1:-}" timeout="${2:-$CONTAINER_START_TIMEOUT}" waited=0
+    if [[ -z "$svc" ]]; then
+        return 1
+    fi
     while (( waited < timeout )); do
         systemctl is-active --quiet "$svc" && return 0
         sleep 3; (( waited += 3 ))
@@ -942,7 +968,7 @@ start_containers() {
     systemctl daemon-reload
     register_rollback_daemon_reload
 
-    local START_FAILED=0 ctr
+    local START_FAILED=0 ctr=""
     for ctr in netbootxyz dokuwiki forgejo; do
         record_service_state "${ctr}.service"
         register_rollback_service "${ctr}.service"
@@ -975,7 +1001,7 @@ verify_installation() {
     info "[8/9] Eindcontroles uitvoeren..."
     local FAILED=0
 
-    local svc
+    local svc=""
     for svc in dnsmasq cockpit.socket firewalld netbootxyz dokuwiki forgejo; do
         if systemctl is-active --quiet "$svc"; then
             ok "  $svc: actief"
@@ -994,15 +1020,15 @@ verify_installation() {
     ss -tlnp 2>/dev/null | grep -qE '(:|\])80[[:space:]]' \
         || { error "  Geen luisterende HTTP-service op TCP-poort 80."; FAILED=1; }
 
-    local body
-    if body="$(curl -fsS --max-time 5 "http://127.0.0.1/")" && [[ -n "$body" ]]; then
+    local body=""
+    if body="$(curl -fsS --max-time 5 "http://127.0.0.1/" 2>/dev/null)" && [[ -n "$body" ]]; then
         ok "  HTTP: root geeft niet-lege body ($(wc -c <<<"$body" | tr -d ' ') bytes)."
     else
         error "  HTTP: root geeft leeg antwoord."
         FAILED=1
     fi
 
-    local f tmp
+    local f="" tmp=""
     tmp="$(mktemp)"
     for f in netboot.xyz.kpxe netboot.xyz.efi; do
         if curl -fsS --max-time 10 "tftp://127.0.0.1/${f}" -o "$tmp" 2>/dev/null \
