@@ -24,8 +24,8 @@
 #
 #  Alle containers worden beheerd via Quadlet: systemd leest declaratieve
 #  .container-bestanden uit /etc/containers/systemd/ en genereert daaruit
-#  services. Containers starten automatisch bij het opstarten van de server
-#  en zijn te beheren via systemctl of Cockpit.
+#  transient services. Containers starten automatisch bij het opstarten van
+#  de server en zijn te beheren via systemctl of Cockpit.
 #
 # -----------------------------------------------------------------------------
 #  ARCHITECTUUR
@@ -109,9 +109,17 @@
 #
 #  Service-state wordt gerespecteerd
 #  ---------------------------------
-#  Voordat het script een service aanraakt, wordt vastgelegd of die
-#  daarvoor al enabled en/of actief was. Bij rollback worden alleen de
-#  wijzigingen teruggedraaid die deze run zelf heeft aangebracht.
+#  Voor host-services (dnsmasq, firewalld, cockpit.socket) wordt de
+#  enabled/active-status vastgelegd voordat het script iets wijzigt. Bij
+#  rollback worden alleen wijzigingen teruggedraaid die deze run zelf
+#  heeft aangebracht.
+#
+#  Quadlet-containers
+#  ------------------
+#  Quadlet genereert transient units. `systemctl enable` werkt daar niet
+#  op; de `[Install] WantedBy=multi-user.target` in het .container-bestand
+#  regelt het starten bij boot. Het script gebruikt daarom `systemctl
+#  start` voor containers, en geen enable/disable in de rollback.
 #
 #  Onderscheid tussen fouten tijdens installatie en mislukte eindcontrole
 #  ----------------------------------------------------------------------
@@ -132,8 +140,8 @@
 #  Eindcontrole
 #  ------------
 #  Na de installatie controleert het script:
-#    * of alle services (dnsmasq, cockpit.socket, firewalld) actief zijn
-#    * of alle containers (netbootxyz, dokuwiki, forgejo) actief zijn
+#    * of alle host-services (dnsmasq, cockpit.socket, firewalld) actief zijn
+#    * of alle containers (netbootxyz, dokuwiki, forgejo) draaien
 #    * of de dnsmasq-configuratie syntactisch geldig is
 #    * of poort 69/UDP en poort 80/TCP luisteren
 #    * of de HTTP-root een niet-lege body teruggeeft
@@ -194,11 +202,6 @@
 #  Voordat het script de containers aanmaakt, controleert het met skopeo
 #  of alle tags bereikbaar zijn.
 #
-#  Beschikbare tags bekijken:
-#     skopeo list-tags docker://docker.io/dokuwiki/dokuwiki
-#     skopeo list-tags docker://codeberg.org/forgejo/forgejo
-#     skopeo list-tags docker://ghcr.io/netbootxyz/netbootxyz
-#
 # -----------------------------------------------------------------------------
 #  NA INSTALLATIE
 # -----------------------------------------------------------------------------
@@ -222,10 +225,15 @@
 #       journalctl -u dnsmasq -f
 #       Controleer interface= in /etc/dnsmasq.d/netboot.conf
 #
-#  Container start niet
+#  Container draait niet
 #       systemctl status <naam>.service
+#       podman ps -a
 #       podman logs <naam>
-#       ss -tlnp
+#
+#  Quadlet-unit start niet
+#       systemctl daemon-reload
+#       systemctl start <naam>.service
+#       journalctl -u <naam>.service -n 50
 #
 #  firewalld start niet of zone ontbreekt
 #       systemctl status firewalld
@@ -323,11 +331,8 @@ register_rollback_service()       { RB_TYPE+=("restore_service"); RB_ARG1+=("${1
 register_rollback_owner()         { RB_TYPE+=("restore_owner");   RB_ARG1+=("${1:-}"); RB_ARG2+=("${2:-}"); }
 register_rollback_reload_fw()     { RB_TYPE+=("reload_firewall"); RB_ARG1+=("");       RB_ARG2+=("");       }
 register_rollback_daemon_reload() { RB_TYPE+=("daemon_reload");   RB_ARG1+=("");       RB_ARG2+=("");       }
+register_rollback_podman_rm()     { RB_TYPE+=("podman_rm");       RB_ARG1+=("${1:-}"); RB_ARG2+=("");       }
 
-# Legt de enabled/active-status van een service vast VOORDAT die wordt
-# aangeraakt. Guard tegen lege servicenaam: zonder deze guard kan een
-# rollback-actie met een lege waarde de associatieve array-index
-# corrumperen ("bad array subscript").
 record_service_state() {
     local svc="${1:-}"
     if [[ -z "$svc" ]]; then
@@ -340,8 +345,6 @@ record_service_state() {
     info "  State ${svc}: enabled=${was_enabled} active=${was_active}"
 }
 
-# Herstelt de vastgelegde staat. Guard tegen lege servicenaam en
-# tegen een ontbrekende state-entry.
 restore_service_state() {
     local svc="${1:-}"
     if [[ -z "$svc" ]]; then
@@ -393,6 +396,10 @@ perform_rollback() {
                 firewall-cmd --reload >/dev/null 2>&1 && info "  firewall herladen" ;;
             daemon_reload)
                 systemctl daemon-reload && info "  systemd daemon-reload" ;;
+            podman_rm)
+                if [[ -n "$a1" ]] && command -v podman >/dev/null 2>&1; then
+                    podman rm -f "$a1" >/dev/null 2>&1 && info "  Container verwijderd: $a1"
+                fi ;;
             *)
                 warn "  Onbekende rollback-actie: ${t:-<leeg>}" ;;
         esac
@@ -950,6 +957,14 @@ EOF
 # =============================================================================
 #  STAP 9 — CONTAINERS STARTEN
 # =============================================================================
+#
+# Quadlet genereert transient units. `systemctl enable` werkt daar niet op;
+# de `[Install] WantedBy=multi-user.target` in het .container-bestand
+# regelt het starten bij boot. Daarom: `systemctl start`, niet `enable`.
+#
+# Ook geen record_service_state voor containers: een transient unit heeft
+# geen enable/disable-state, en bij rollback wordt de .container-file zelf
+# teruggezet, wat de unit laat verdwijnen na daemon-reload.
 
 wait_for_service() {
     local svc="${1:-}" timeout="${2:-$CONTAINER_START_TIMEOUT}" waited=0
@@ -970,20 +985,23 @@ start_containers() {
 
     local START_FAILED=0 ctr=""
     for ctr in netbootxyz dokuwiki forgejo; do
-        record_service_state "${ctr}.service"
-        register_rollback_service "${ctr}.service"
+        register_rollback_podman_rm "$ctr"
 
-        if ! systemctl enable --now "${ctr}.service" 2>/dev/null; then
+        # systemctl start — NIET enable --now (transient unit)
+        if ! systemctl start "${ctr}.service" 2>/dev/null; then
             error "  ${ctr}: starten mislukt."
-            journalctl -u "${ctr}.service" -n 30 --no-pager
+            journalctl -u "${ctr}.service" -n 30 --no-pager || true
+            podman logs "$ctr" 2>&1 | tail -30 || true
             START_FAILED=1
             continue
         fi
+
         if wait_for_service "${ctr}.service" "$CONTAINER_START_TIMEOUT"; then
             ok "  ${ctr}: actief."
         else
             error "  ${ctr}: niet actief na ${CONTAINER_START_TIMEOUT}s."
-            journalctl -u "${ctr}.service" -n 30 --no-pager
+            journalctl -u "${ctr}.service" -n 30 --no-pager || true
+            podman logs "$ctr" 2>&1 | tail -30 || true
             START_FAILED=1
         fi
     done
@@ -1001,12 +1019,25 @@ verify_installation() {
     info "[8/9] Eindcontroles uitvoeren..."
     local FAILED=0
 
+    # Host-services
     local svc=""
-    for svc in dnsmasq cockpit.socket firewalld netbootxyz dokuwiki forgejo; do
+    for svc in dnsmasq cockpit.socket firewalld; do
         if systemctl is-active --quiet "$svc"; then
             ok "  $svc: actief"
         else
             error "  $svc: NIET actief"
+            FAILED=1
+        fi
+    done
+
+    # Containers — via podman ps, niet via systemctl is-active
+    # (Quadlet-units kunnen "activating" tonen terwijl de container al draait)
+    local ctr=""
+    for ctr in netbootxyz dokuwiki forgejo; do
+        if podman ps --format '{{.Names}}' 2>/dev/null | grep -q "^${ctr}$"; then
+            ok "  container ${ctr}: draait"
+        else
+            error "  container ${ctr}: draait NIET"
             FAILED=1
         fi
     done
@@ -1098,6 +1129,7 @@ print_summary_failure() {
     echo "  Onderzoek:"
     echo "    systemctl status <service>"
     echo "    journalctl -u <service> -n 50 --no-pager"
+    echo "    podman ps -a"
     echo "    podman logs <container>"
     echo "    ss -ulnp | grep :69"
     echo "    ss -tlnp | grep :80"
