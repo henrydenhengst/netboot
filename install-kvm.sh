@@ -53,7 +53,6 @@ zypper --non-interactive --gpg-auto-import-keys refresh
 echo "==> KVM/QEMU en libvirt installeren"
 zypper --non-interactive install \
     qemu-x86 \
-    qemu-x86_64 \
     libvirt-client \
     libvirt-daemon-driver-qemu \
     libvirt-daemon-driver-network \
