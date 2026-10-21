@@ -1,20 +1,11 @@
 #!/usr/bin/env bash
 # install-kvm-leap16.sh
 # KVM/QEMU + libvirt + NAT voor openSUSE Leap 16
-#
-# Doel:
-#   - KVM/QEMU en libvirt installeren
-#   - Modulaire libvirt-daemons (virtqemud, virtnetworkd) activeren
-#   - Standaard NAT-netwerk 'default' definiëren, autostarten en starten
-#
-# Niet gewijzigd:
-#   - Fysieke netwerkconfiguratie
-#   - Podman
-#
+
 set -Eeuo pipefail
 
 #------------------------------------------------------------------------------
-# 0. Voorwaarden
+# Controles
 #------------------------------------------------------------------------------
 
 if [[ $EUID -ne 0 ]]; then
@@ -22,7 +13,6 @@ if [[ $EUID -ne 0 ]]; then
     exit 1
 fi
 
-# shellcheck disable=SC1091
 source /etc/os-release
 if [[ "${ID:-}" != "opensuse-leap" || "${VERSION_ID:-}" != 16* ]]; then
     echo "FOUT: dit script is bedoeld voor openSUSE Leap 16."
@@ -31,12 +21,10 @@ fi
 
 if [[ ! -c /dev/kvm ]]; then
     echo "FOUT: /dev/kvm ontbreekt of is geen character device."
-    echo "Controleer of virtualisatie in de BIOS/UEFI is ingeschakeld"
-    echo "en of de kvm-module geladen is (lsmod | grep kvm)."
     exit 1
 fi
 
-for cmd in zypper systemctl virsh; do
+for cmd in zypper systemctl; do
     if ! command -v "$cmd" >/dev/null 2>&1; then
         echo "FOUT: vereist commando '$cmd' niet gevonden."
         exit 1
@@ -44,7 +32,7 @@ for cmd in zypper systemctl virsh; do
 done
 
 #------------------------------------------------------------------------------
-# 1. Pakketten installeren
+# Pakketten
 #------------------------------------------------------------------------------
 
 echo "==> Pakketbronnen vernieuwen"
@@ -60,7 +48,7 @@ zypper --non-interactive install \
     libvirt-daemon-config-network
 
 #------------------------------------------------------------------------------
-# 2. Controleren of de modulaire libvirt-units bestaan
+# Services
 #------------------------------------------------------------------------------
 
 echo "==> Controleren van libvirt-services"
@@ -72,10 +60,6 @@ for svc in virtqemud.socket virtnetworkd.socket; do
     fi
 done
 
-#------------------------------------------------------------------------------
-# 3. Daemons activeren
-#------------------------------------------------------------------------------
-
 echo "==> QEMU-daemon activeren"
 systemctl enable --now virtqemud.socket
 
@@ -83,7 +67,7 @@ echo "==> Netwerkdaemon activeren"
 systemctl enable --now virtnetworkd.socket
 
 #------------------------------------------------------------------------------
-# 4. Standaard NAT-netwerk definiëren (indien nodig)
+# NAT-netwerk
 #------------------------------------------------------------------------------
 
 echo "==> Standaard NAT-netwerk controleren"
@@ -101,10 +85,6 @@ fi
 echo "==> NAT-netwerk automatisch laten starten"
 virsh -c qemu:///system net-autostart default
 
-#------------------------------------------------------------------------------
-# 5. NAT-netwerk starten (robuust, zonder pipefail-valkuil)
-#------------------------------------------------------------------------------
-
 echo "==> NAT-netwerk starten"
 net_active="$(virsh -c qemu:///system net-info default \
               | awk '/^Active:/ {print $2}')"
@@ -112,27 +92,8 @@ if [[ "$net_active" != "yes" ]]; then
     virsh -c qemu:///system net-start default
 fi
 
-# Wacht kort tot virbr0 daadwerkelijk bestaat (dnsmasq is asynchroon).
-for _ in {1..10}; do
-    if ip -br link show virbr0 >/dev/null 2>&1; then
-        break
-    fi
-    sleep 0.5
-done
-
 #------------------------------------------------------------------------------
-# 6. Firewalld-sanity (openSUSE-specifiek)
-#------------------------------------------------------------------------------
-
-if systemctl is-active --quiet firewalld; then
-    if ! firewall-cmd --zone=libvirt --list-all >/dev/null 2>&1; then
-        echo "WAARSCHUWING: firewalld-zone 'libvirt' niet gevonden."
-        echo "NAT-forwarding werkt mogelijk niet zoals verwacht."
-    fi
-fi
-
-#------------------------------------------------------------------------------
-# 7. Overzicht
+# Overzicht
 #------------------------------------------------------------------------------
 
 echo
