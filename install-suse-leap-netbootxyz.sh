@@ -1,21 +1,20 @@
 #!/usr/bin/env bash
 # =============================================================================
-#  NETBOOT STACK INSTALLER VOOR OPENSUSE LEAP (bijgewerkt)
+#  NETBOOT STACK INSTALLER VOOR OPENSUSE LEAP — DEFINITIEVE VERSIE
 # =============================================================================
-#  Wijzigingen t.o.v. de oorspronkelijke versie:
-#    - Automatische download van netboot.xyz bootbestanden.
-#    - Automatische kopie naar /srv/netboot-config/menus (TFTP-root van container).
-#    - Automatische 0xFF-workaround voor Dell E7440.
-#    - DNS_SERVER=1.1.1.1 in de netbootxyz Quadlet-unit.
-#    - Eindcontrole test TFTP via het fysieke IP.
+#  Deze versie is gebaseerd op de live-geteste configuratie en bevat:
+#    - Automatische download van netboot.xyz bootbestanden
+#    - Automatische deploy naar /srv/netboot-config/menus (TFTP-root container)
+#    - 0xFF-workaround voor Dell E7440 (en vergelijkbare hardware)
+#    - DNS_SERVER=1.1.1.1 in de netbootxyz Quadlet-unit
+#    - Robuuste foutafhandeling met getypeerde rollback
+#    - Uitgebreide eindcontrole per component (PASS/FAIL)
+#    - Retry-logica voor containerstarts
+#    - Pre-flight check van python3 en skopeo
 # =============================================================================
 
 set -euo pipefail
 IFS=$'\n\t'
-
-# =============================================================================
-#  CONSTANTEN
-# =============================================================================
 
 readonly SCRIPT_NAME="$(basename "$0")"
 readonly LOG_FILE="/var/log/netboot-stack-install.log"
@@ -45,6 +44,7 @@ readonly NETBOOT_DOWNLOADS_EFI="https://boot.netboot.xyz/ipxe/netboot.xyz.efi"
 readonly NETBOOT_DOWNLOADS_KPXE="https://boot.netboot.xyz/ipxe/netboot.xyz.kpxe"
 
 readonly CONTAINER_START_TIMEOUT=90
+readonly CONTAINER_MAX_ATTEMPTS=3
 
 declare -a RB_TYPE=() RB_ARG1=() RB_ARG2=()
 declare -A SERVICE_STATE=()
@@ -127,16 +127,18 @@ perform_rollback() {
     local idx
     for (( idx=${#RB_TYPE[@]}-1; idx>=0; idx-- )); do
         local t="${RB_TYPE[$idx]:-}" a1="${RB_ARG1[$idx]:-}" a2="${RB_ARG2[$idx]:-}"
+        set +e
         case "$t" in
-            restore_file)   [[ -n "$a1" && -n "$a2" && -f "$a2" ]] && cp -a "$a2" "$a1" && info "  Hersteld: $a1" ;;
-            remove_path)    [[ -d "$a1" ]] && rmdir "$a1" 2>/dev/null && info "  Map weg: $a1" || { [[ -e "$a1" ]] && rm -f "$a1" && info "  Bestand weg: $a1"; } ;;
+            restore_file)    [[ -n "$a1" && -n "$a2" && -f "$a2" ]] && cp -a "$a2" "$a1" && info "  Hersteld: $a1" ;;
+            remove_path)     if [[ -d "$a1" ]]; then rmdir "$a1" 2>/dev/null && info "  Map weg: $a1"; elif [[ -e "$a1" ]]; then rm -f "$a1" && info "  Bestand weg: $a1"; fi ;;
             restore_service) info "  Service-state: ${a1:-?}"; restore_service_state "$a1" ;;
-            restore_owner)  [[ -n "$a1" && -n "$a2" && -e "$a1" ]] && chown "$a2" "$a1" 2>/dev/null && info "  Eigenaar: $a1 → $a2" ;;
+            restore_owner)   [[ -n "$a1" && -n "$a2" && -e "$a1" ]] && chown "$a2" "$a1" 2>/dev/null && info "  Eigenaar: $a1 → $a2" ;;
             reload_firewall) firewall-cmd --reload >/dev/null 2>&1 && info "  firewall herladen" ;;
-            daemon_reload)  systemctl daemon-reload && info "  daemon-reload" ;;
-            podman_rm)      [[ -n "$a1" ]] && command -v podman >/dev/null && podman rm -f "$a1" >/dev/null 2>&1 && info "  Container weg: $a1" ;;
-            *)              warn "  Onbekende actie: $t" ;;
+            daemon_reload)   systemctl daemon-reload && info "  daemon-reload" ;;
+            podman_rm)       [[ -n "$a1" ]] && command -v podman >/dev/null && podman rm -f "$a1" >/dev/null 2>&1 && info "  Container weg: $a1" ;;
+            *)               warn "  Onbekende actie: $t" ;;
         esac
+        set -e
     done
     RB_TYPE=(); RB_ARG1=(); RB_ARG2=()
     ok "Rollback voltooid."
@@ -174,10 +176,6 @@ backup_or_register_new() {
         register_rollback_remove "$file"
     fi
 }
-
-# =============================================================================
-#  NETWERKBERekENING (pure bash)
-# =============================================================================
 
 prefix_to_netmask() {
     local prefix=$1
@@ -238,9 +236,16 @@ require_zypper()  { command_exists zypper    || { error "zypper vereist.";  exit
 install_prerequisites() {
     info "[0/9] Prerequisites controleren..."
     if ! command_exists skopeo; then
+        info "  skopeo installeren..."
         zypper --non-interactive install --no-recommends skopeo || die "skopeo mislukt."
     fi
     ok "  skopeo aanwezig."
+
+    if ! command_exists python3; then
+        info "  python3 installeren (nodig voor 0xFF-workaround)..."
+        zypper --non-interactive install --no-recommends python3 || die "python3 mislukt."
+    fi
+    ok "  python3 aanwezig."
 
     if ! command_exists ipcalc; then
         zypper --non-interactive install --no-recommends ipcalc >/dev/null 2>&1 \
@@ -258,6 +263,7 @@ verify_image_tags() {
             die "Tag NIET gevonden: ${image}"
         fi
     done
+    warn "  Let op: netboot.xyz gebruikt 'latest' — niet reproduceerbaar."
 }
 
 # =============================================================================
@@ -436,8 +442,7 @@ create_directories() {
 
 download_netboot_files() {
     info "[3b/9] netboot.xyz bootbestanden downloaden..."
-
-    local f url
+    local f url pair
     for pair in "netboot.xyz.efi:${NETBOOT_DOWNLOADS_EFI}" "netboot.xyz.kpxe:${NETBOOT_DOWNLOADS_KPXE}"; do
         f="${pair%%:*}"; url="${pair#*:}"
         if [[ -s "${TFTP_DIR}/${f}" ]]; then
@@ -473,7 +478,7 @@ PYEOF
     then
         ok "  Workaround aangemaakt."
     else
-        warn "  0xFF-workaround mislukt (niet fataal)."
+        die "  0xFF-workaround mislukt (python3 ontbreekt of fout)."
     fi
 }
 
@@ -676,6 +681,32 @@ wait_for_service() {
     return 1
 }
 
+start_one_container() {
+    local ctr="$1"
+    local attempt=1
+    while (( attempt <= CONTAINER_MAX_ATTEMPTS )); do
+        info "  ${ctr}: poging ${attempt}/${CONTAINER_MAX_ATTEMPTS}..."
+        if systemctl start "${ctr}.service" 2>/dev/null; then
+            if wait_for_service "${ctr}.service" "$CONTAINER_START_TIMEOUT"; then
+                ok "  ${ctr}: actief."
+                return 0
+            fi
+            warn "  ${ctr}: gestart maar niet actief binnen ${CONTAINER_START_TIMEOUT}s."
+        else
+            warn "  ${ctr}: systemctl start faalde."
+        fi
+        if (( attempt < CONTAINER_MAX_ATTEMPTS )); then
+            info "  ${ctr}: 10s wachten voor volgende poging..."
+            sleep 10
+        fi
+        (( attempt++ ))
+    done
+    error "  ${ctr}: na ${CONTAINER_MAX_ATTEMPTS} pogingen niet actief."
+    journalctl -u "${ctr}.service" -n 30 --no-pager || true
+    podman logs "$ctr" 2>&1 | tail -30 || true
+    return 1
+}
+
 start_containers() {
     info "[7/9] Containers starten (max ${CONTAINER_START_TIMEOUT}s elk)..."
     systemctl daemon-reload
@@ -684,23 +715,11 @@ start_containers() {
     local START_FAILED=0 ctr=""
     for ctr in netbootxyz dokuwiki forgejo; do
         register_rollback_podman_rm "$ctr"
-        if ! systemctl start "${ctr}.service" 2>/dev/null; then
-            error "  ${ctr}: starten mislukt."
-            journalctl -u "${ctr}.service" -n 30 --no-pager || true
-            podman logs "$ctr" 2>&1 | tail -30 || true
-            START_FAILED=1
-            continue
-        fi
-        if wait_for_service "${ctr}.service" "$CONTAINER_START_TIMEOUT"; then
-            ok "  ${ctr}: actief."
-        else
-            error "  ${ctr}: niet actief na ${CONTAINER_START_TIMEOUT}s."
-            journalctl -u "${ctr}.service" -n 30 --no-pager || true
-            podman logs "$ctr" 2>&1 | tail -30 || true
+        if ! start_one_container "$ctr"; then
             START_FAILED=1
         fi
     done
-    (( START_FAILED != 0 )) && die "Een of meer containers faalden."
+    (( START_FAILED != 0 )) && die "Een of meer containers faalden na retries."
 }
 
 # =============================================================================
@@ -711,52 +730,77 @@ verify_installation() {
     info "[8/9] Eindcontroles uitvoeren..."
     local FAILED=0
 
+    info "  Host-services:"
     local svc=""
     for svc in dnsmasq cockpit.socket firewalld; do
-        systemctl is-active --quiet "$svc" && ok "  $svc: actief" || { error "  $svc: NIET actief"; FAILED=1; }
+        systemctl is-active --quiet "$svc" && ok "    $svc: actief" || { error "    $svc: NIET actief"; FAILED=1; }
     done
 
+    info "  Containers draaien:"
     local ctr=""
     for ctr in netbootxyz dokuwiki forgejo; do
-        podman ps --format '{{.Names}}' 2>/dev/null | grep -q "^${ctr}$" && ok "  container ${ctr}: draait" || { error "  container ${ctr}: draait NIET"; FAILED=1; }
+        podman ps --format '{{.Names}}' 2>/dev/null | grep -q "^${ctr}$" && ok "    ${ctr}: draait" || { error "    ${ctr}: draait NIET"; FAILED=1; }
     done
 
-    dnsmasq --test >/dev/null 2>&1 || { error "  dnsmasq --test faalt."; FAILED=1; }
+    info "  dnsmasq configuratie:"
+    dnsmasq --test >/dev/null 2>&1 && ok "    syntactisch geldig" || { error "    ongeldig"; FAILED=1; }
 
-    ss -ulnp 2>/dev/null | grep -qE '(:|\])69[[:space:]]' || { error "  Geen TFTP op UDP 69."; FAILED=1; }
-    ss -tlnp 2>/dev/null | grep -qE '(:|\])80[[:space:]]' || { error "  Geen HTTP op TCP 80."; FAILED=1; }
+    info "  Poorten:"
+    ss -ulnp 2>/dev/null | grep -qE '(:|\])69[[:space:]]' && ok "    TFTP UDP 69 luistert" || { error "    TFTP UDP 69 luistert NIET"; FAILED=1; }
+    ss -tlnp 2>/dev/null | grep -qE '(:|\])80[[:space:]]' && ok "    HTTP TCP 80 luistert" || { error "    HTTP TCP 80 luistert NIET"; FAILED=1; }
 
+    info "  HTTP-responsiviteit:"
     local body=""
     if body="$(curl -fsS --max-time 5 "http://127.0.0.1/" 2>/dev/null)" && [[ -n "$body" ]]; then
-        ok "  HTTP: root geeft niet-lege body ($(wc -c <<<"$body" | tr -d ' ') bytes)."
+        ok "    netboot.xyz HTTP root geeft ${#body} bytes."
     else
-        error "  HTTP: root geeft leeg antwoord."
+        error "    netboot.xyz HTTP root geeft leeg antwoord."
         FAILED=1
     fi
 
-    # TFTP lokaal via 127.0.0.1
+    info "  TFTP lokaal (127.0.0.1):"
     local f="" tmp=""
     tmp="$(mktemp)"
     for f in netboot.xyz.kpxe netboot.xyz.efi; do
         if curl -fsS --max-time 10 "tftp://127.0.0.1/${f}" -o "$tmp" 2>/dev/null && [[ -s "$tmp" ]]; then
-            ok "  TFTP (127.0.0.1): ${f} opgehaald ($(stat -c%s "$tmp") bytes)."
+            ok "    ${f}: $(stat -c%s "$tmp") bytes."
         else
-            error "  TFTP (127.0.0.1): ${f} NIET opgehaald."
+            error "    ${f}: NIET opgehaald."
             FAILED=1
         fi
     done
     rm -f "$tmp"
 
-    # TFTP via het fysieke IP (realistischer)
-    if [[ -n "${SELECTED_IP:-}" ]]; then
-        tmp="$(mktemp)"
-        if curl -fsS --max-time 10 "tftp://${SELECTED_IP}/netboot.xyz.efi" -o "$tmp" 2>/dev/null && [[ -s "$tmp" ]]; then
-            ok "  TFTP (${SELECTED_IP}): netboot.xyz.efi opgehaald ($(stat -c%s "$tmp") bytes)."
-        else
-            warn "  TFTP (${SELECTED_IP}): niet bereikbaar — controleer firewall."
-            FAILED=1
-        fi
-        rm -f "$tmp"
+    info "  TFTP via fysiek IP (${SELECTED_IP}):"
+    tmp="$(mktemp)"
+    if curl -fsS --max-time 10 "tftp://${SELECTED_IP}/netboot.xyz.efi" -o "$tmp" 2>/dev/null && [[ -s "$tmp" ]]; then
+        ok "    netboot.xyz.efi: $(stat -c%s "$tmp") bytes."
+    else
+        warn "    niet bereikbaar via ${SELECTED_IP} — controleer firewall."
+        FAILED=1
+    fi
+    rm -f "$tmp"
+
+    info "  0xFF-workaround aanwezig:"
+    if [[ -f "${NETBOOT_MENUS_DIR}/netboot.xyz.efi"* ]]; then
+        local count; count=$(find "${NETBOOT_MENUS_DIR}" -maxdepth 1 -name 'netboot.xyz.efi*' | wc -l)
+        (( count >= 2 )) && ok "    ${count} varianten gevonden." || { error "    workaround ontbreekt."; FAILED=1; }
+    fi
+
+    info "  DokuWiki HTTP:"
+    if curl -fsS --max-time 5 "http://127.0.0.1:${DOKUWIKI_PORT}/" >/dev/null 2>&1; then
+        ok "    DokuWiki antwoordt op poort ${DOKUWIKI_PORT}."
+    else
+        error "    DokuWiki antwoordt NIET op poort ${DOKUWIKI_PORT}."
+        FAILED=1
+    fi
+
+    info "  Forgejo HTTP:"
+    if curl -fsS --max-time 5 "http://127.0.0.1:${FORGEJO_HTTP_PORT}/" >/dev/null 2>&1; then
+        ok "    Forgejo antwoordt op poort ${FORGEJO_HTTP_PORT}."
+    else
+        error "    Forgejo antwoordt NIET op poort ${FORGEJO_HTTP_PORT}."
+        FAILED=1
     fi
 
     return "$FAILED"
@@ -819,6 +863,9 @@ print_summary_failure() {
     echo "    podman logs <container>"
     echo "    ss -ulnp | grep :69"
     echo "    ss -tlnp | grep :80"
+    echo "    curl -I http://127.0.0.1/"
+    echo "    curl -I http://127.0.0.1:12081/"
+    echo "    curl -I http://127.0.0.1:12082/"
     echo "============================================================"
     echo
 }
