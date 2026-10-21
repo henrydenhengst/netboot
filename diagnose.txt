@@ -1,3 +1,36 @@
+henry@deploymentserver:~> sudo bash fix.sh 
+============================================================
+  NETBOOT.XYZ VOLLEDIGE OPLOSSING
+  Datum: wo 21 okt 2026 10:56:06 CEST
+============================================================
+
+[INFO] STAP 1: Mappen controleren/aanmaken...
+[OK]   Mappen gereed: /srv/tftp en /srv/netboot-config/menus
+
+[INFO] STAP 2: Bootbestanden downloaden...
+[OK]     netboot.xyz.efi bestaat al (1190400 bytes). Overslaan.
+[OK]     netboot.xyz.kpxe bestaat al (448529 bytes). Overslaan.
+
+[INFO] STAP 3: Bestanden kopiëren naar /srv/netboot-config/menus...
+[OK]     Gekopieerd: netboot.xyz.efi
+[OK]     Gekopieerd: netboot.xyz.kpxe
+[INFO]   Workaround aanmaken voor Dell E7440 (0xFF-teken)...
+[OK]   Workaround aangemaakt: /srv/netboot-config/menus/netboot.xyz.efiÿ
+
+[INFO] STAP 4: Container 'netbootxyz' herstarten...
+[INFO] Wachten tot de container actief is...
+[OK]   Container draait weer.
+
+[INFO] STAP 5: TFTP lokaal verifiëren...
+[OK]     TFTP: netboot.xyz.efi succesvol opgehaald (1190400 bytes).
+[OK]     TFTP: netboot.xyz.kpxe succesvol opgehaald (448529 bytes).
+
+============================================================
+[OK]   OPLOSSING VOLTOOID
+============================================================
+  De TFTP-server werkt nu correct en de bestanden zijn
+  aanwezig, inclusief de 0xFF-workaround voor de Dell E7440.
+
   Volgende stap:
     1. Start de Dell E7440 op via PXE (F12 → Onboard NIC).
     2. Bekijk live logs met:
@@ -5,9 +38,6 @@
 ============================================================
 henry@deploymentserver:~>          sudo podman logs -f netbootxyz
 [init] Setting up user nbxyz with PUID=1000 and PGID=1000
-[netbootxyz-init] Downloading Secure Boot binaries (iPXE v2.0.0)...
-curl: (6) Could not resolve host: release-assets.githubusercontent.com (Timeout while contacting DNS servers)
-[netbootxyz-init] autoexec.ipxe not available for 3.0.3, skipping
             _   _                 _                      
  _ __   ___| |_| |__   ___   ___ | |_  __  ___   _ ____  
 | '_ \ / _ \ __| '_ \ / _ \ / _ \| __| \ \/ / | | |_  /  
@@ -21,20 +51,22 @@ https://opencollective.com/netbootxyz
 https://github.com/sponsors/netbootxyz
 
 [start] Starting supervisord (programs will run as nbxyz)
-2026-10-21 08:51:30,828 INFO Set uid to user 0 succeeded
-2026-10-21 08:51:30,830 INFO supervisord started with pid 1
-2026-10-21 08:51:31,834 INFO spawned: 'nginx' with pid 41
-2026-10-21 08:51:31,835 INFO spawned: 'dnsmasq' with pid 42
-2026-10-21 08:51:31,837 INFO spawned: 'webapp' with pid 43
+2026-10-21 08:56:08,637 INFO Set uid to user 0 succeeded
+2026-10-21 08:56:08,640 INFO supervisord started with pid 1
+2026-10-21 08:56:09,643 INFO spawned: 'nginx' with pid 23
+2026-10-21 08:56:09,644 INFO spawned: 'dnsmasq' with pid 24
+2026-10-21 08:56:09,646 INFO spawned: 'webapp' with pid 25
 [dnsmasq] Starting TFTP server on port 69
 [dnsmasq] TFTP root: /config/menus
 [dnsmasq] TFTP security: enabled
 [dnsmasq] Logging: enabled (dhcp and queries)
-dnsmasq[42]: started, version 2.92rel2 DNS disabled
-dnsmasq[42]: compile time options: IPv6 GNU-getopt no-DBus no-UBus no-i18n no-IDN DHCP DHCPv6 no-Lua TFTP no-conntrack ipset no-nftset auth no-DNSSEC loop-detect inotify dumpfile
-dnsmasq-tftp[42]: TFTP root is /config/menus secure mode single port mode
-dnsmasq-tftp[42]: sent /config/menus/netboot.xyz.efi to 10.88.0.1
-2026-10-21 08:51:33,006 INFO success: nginx entered RUNNING state, process has stayed up for > than 1 seconds (startsecs)
-2026-10-21 08:51:33,007 INFO success: dnsmasq entered RUNNING state, process has stayed up for > than 1 seconds (startsecs)
-2026-10-21 08:51:33,007 INFO success: webapp entered RUNNING state, process has stayed up for > than 1 seconds (startsecs)
-dnsmasq-tftp[42]: sent /config/menus/netboot.xyz.kpxe to 10.88.0.1
+dnsmasq[24]: started, version 2.92rel2 DNS disabled
+dnsmasq[24]: compile time options: IPv6 GNU-getopt no-DBus no-UBus no-i18n no-IDN DHCP DHCPv6 no-Lua TFTP no-conntrack ipset no-nftset auth no-DNSSEC loop-detect inotify dumpfile
+dnsmasq-tftp[24]: TFTP root is /config/menus secure mode single port mode
+2026-10-21 08:56:10,982 INFO success: nginx entered RUNNING state, process has stayed up for > than 1 seconds (startsecs)
+2026-10-21 08:56:10,982 INFO success: dnsmasq entered RUNNING state, process has stayed up for > than 1 seconds (startsecs)
+2026-10-21 08:56:10,982 INFO success: webapp entered RUNNING state, process has stayed up for > than 1 seconds (startsecs)
+dnsmasq-tftp[24]: sent /config/menus/netboot.xyz.efi to 10.88.0.1
+dnsmasq-tftp[24]: sent /config/menus/netboot.xyz.kpxe to 10.88.0.1
+
+
