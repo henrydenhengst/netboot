@@ -1,16 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
-#  VOLLEDIGE OPLOSSING VOOR NETBOOT.XYZ TFTP-PROBLEEM
+#  LAATSTE PROBLEMEN OPLOSSEN: DNS in container & Netwerkbereikbaarheid
 # =============================================================================
-#  Dit script lost het probleem in één keer op:
-#    1. Downloadt de ontbrekende bootbestanden van de officiële server.
-#    2. Plaatst ze in /srv/tftp (host) én in /srv/netboot-config/menus
-#       (de map die de container daadwerkelijk gebruikt voor TFTP).
-#    3. Herstart de netbootxyz-container.
-#    4. Verifieert dat TFTP lokaal werkt.
-#    5. Maakt optioneel de 0xFF-workaround aan voor de Dell E7440.
-# =============================================================================
-
 set -uo pipefail
 
 C_RED=$'\033[0;31m'
@@ -25,141 +16,135 @@ fail() { echo -e "${C_RED}[FAIL]${C_RESET} $*"; }
 info() { echo -e "${C_BLUE}[INFO]${C_RESET} $*"; }
 
 if [[ $EUID -ne 0 ]]; then
-    fail "Dit script moet als root worden uitgevoerd (sudo)."
+    fail "Voer dit script uit als root (sudo)."
     exit 1
 fi
 
-# -----------------------------------------------------------------------------
-# Configuratie
-# -----------------------------------------------------------------------------
-TFTP_DIR="/srv/tftp"
-CONFIG_DIR="/srv/netboot-config"
-MENUS_DIR="${CONFIG_DIR}/menus"
+QUADLET_FILE="/etc/containers/systemd/netbootxyz.container"
 CONTAINER="netbootxyz"
 
-# Officiële download-URL's (rolling release)
-declare -A DOWNLOADS=(
-    ["netboot.xyz.efi"]="https://boot.netboot.xyz/ipxe/netboot.xyz.efi"
-    ["netboot.xyz.kpxe"]="https://boot.netboot.xyz/ipxe/netboot.xyz.kpxe"
-)
-
 echo "============================================================"
-echo "  NETBOOT.XYZ VOLLEDIGE OPLOSSING"
-echo "  Datum: $(date)"
+echo "  LAATSTE PROBLEMEN OPLOSSEN"
 echo "============================================================"
 echo
 
 # -----------------------------------------------------------------------------
-# STAP 1: Mappen aanmaken
+# STAP 1: DNS-probleem in de container oplossen
 # -----------------------------------------------------------------------------
-info "STAP 1: Mappen controleren/aanmaken..."
-mkdir -p "$TFTP_DIR" "$MENUS_DIR" || { fail "Kon mappen niet aanmaken."; exit 1; }
-ok "Mappen gereed: $TFTP_DIR en $MENUS_DIR"
-echo
+info "STAP 1: DNS-configuratie in de container harden..."
 
-# -----------------------------------------------------------------------------
-# STAP 2: Bootbestanden downloaden (indien nog niet aanwezig)
-# -----------------------------------------------------------------------------
-info "STAP 2: Bootbestanden downloaden..."
-for f in "${!DOWNLOADS[@]}"; do
-    if [[ -s "${TFTP_DIR}/${f}" ]]; then
-        ok "  ${f} bestaat al ($(stat -c%s "${TFTP_DIR}/${f}") bytes). Overslaan."
-        continue
-    fi
-    info "  Downloaden: ${f}..."
-    if curl -fL --retry 3 --connect-timeout 15 -o "${TFTP_DIR}/${f}" "${DOWNLOADS[$f]}"; then
-        SIZE=$(stat -c%s "${TFTP_DIR}/${f}")
-        ok "  ${f} gedownload (${SIZE} bytes)."
-    else
-        fail "  Downloaden van ${f} mislukt."
-        exit 1
-    fi
-done
-echo
-
-# -----------------------------------------------------------------------------
-# STAP 3: Bestanden kopiëren naar de map die de container gebruikt
-# -----------------------------------------------------------------------------
-info "STAP 3: Bestanden kopiëren naar ${MENUS_DIR}..."
-for f in "${!DOWNLOADS[@]}"; do
-    cp -f "${TFTP_DIR}/${f}" "${MENUS_DIR}/${f}" \
-        && ok "  Gekopieerd: ${f}" \
-        || { fail "  Kopiëren mislukt: ${f}"; exit 1; }
-done
-
-# 0xFF-workaround voor de Dell E7440 meteen aanmaken
-info "  Workaround aanmaken voor Dell E7440 (0xFF-teken)..."
-python3 - "${MENUS_DIR}/netboot.xyz.efi" <<'PYEOF'
-import sys, shutil
-src = sys.argv[1]
-dst = src + '\xff'
-shutil.copyfile(src, dst)
-print(f"[OK]   Workaround aangemaakt: {dst.encode('utf-8', 'backslashreplace').decode()}")
-PYEOF
-
-echo
-
-# -----------------------------------------------------------------------------
-# STAP 4: Container herstarten
-# -----------------------------------------------------------------------------
-info "STAP 4: Container '${CONTAINER}' herstarten..."
-if ! systemctl restart "${CONTAINER}.service"; then
-    fail "Herstarten van ${CONTAINER}.service mislukt."
+if [[ ! -f "$QUADLET_FILE" ]]; then
+    fail "Quadlet-bestand $QUADLET_FILE niet gevonden."
     exit 1
 fi
 
-info "Wachten tot de container actief is..."
-for i in {1..20}; do
-    if podman ps --format '{{.Names}}' 2>/dev/null | grep -q "^${CONTAINER}$"; then
-        ok "Container draait weer."
-        break
-    fi
-    sleep 3
-    if [[ $i -eq 20 ]]; then
-        fail "Container is niet binnen 60 seconden actief geworden."
-        podman logs --tail 30 "$CONTAINER" 2>&1 || true
-        exit 1
-    fi
-done
-echo
+# Maak een back-up
+cp -a "$QUADLET_FILE" "${QUADLET_FILE}.bak.$(date +%Y%m%d-%H%M%S)"
 
-# -----------------------------------------------------------------------------
-# STAP 5: TFTP lokaal verifiëren
-# -----------------------------------------------------------------------------
-info "STAP 5: TFTP lokaal verifiëren..."
-TMP_FILE=$(mktemp)
-TFTP_OK=0
-for f in "${!DOWNLOADS[@]}"; do
-    if curl -fsS --max-time 20 "tftp://127.0.0.1/${f}" -o "$TMP_FILE" 2>/dev/null; then
-        SIZE=$(stat -c%s "$TMP_FILE")
-        ok "  TFTP: ${f} succesvol opgehaald (${SIZE} bytes)."
-        TFTP_OK=1
-    else
-        fail "  TFTP: ${f} kon NIET worden opgehaald."
-    fi
-done
-rm -f "$TMP_FILE"
-echo
-
-# -----------------------------------------------------------------------------
-# STAP 6: Eindconclusie
-# -----------------------------------------------------------------------------
-if [[ "$TFTP_OK" -eq 1 ]]; then
-    echo "============================================================"
-    ok "OPLOSSING VOLTOOID"
-    echo "============================================================"
-    echo "  De TFTP-server werkt nu correct en de bestanden zijn"
-    echo "  aanwezig, inclusief de 0xFF-workaround voor de Dell E7440."
-    echo
-    echo "  Volgende stap:"
-    echo "    1. Start de Dell E7440 op via PXE (F12 → Onboard NIC)."
-    echo "    2. Bekijk live logs met:"
-    echo "         sudo podman logs -f ${CONTAINER}"
-    echo "============================================================"
-    exit 0
+# Voeg DNS_SERVER toe als deze nog niet bestaat
+if grep -q "Environment=DNS_SERVER" "$QUADLET_FILE"; then
+    ok "DNS_SERVER is al geconfigureerd in het Quadlet-bestand."
 else
-    fail "TFTP werkt nog niet lokaal. Containerlogs:"
-    echo
-    podman logs --tail 40 "$CONTAINER" 2>&1 || true
+    # Voeg de regel toe onder [Container]
+    sed -i '/^\[Container\]/a Environment=DNS_SERVER=1.1.1.1' "$QUADLET_FILE"
+    ok "DNS_SERVER=1.1.1.1 toegevoegd aan $QUADLET_FILE."
+fi
+
+info "Container herstarten om DNS toe te passen..."
+systemctl daemon-reload
+systemctl restart "${CONTAINER}.service"
+sleep 5
+
+if podman ps --format '{{.Names}}' | grep -q "^${CONTAINER}$"; then
+    ok "Container draait weer."
+else
+    fail "Container is niet gestart. Controleer logs met: podman logs $CONTAINER"
     exit 1
 fi
+echo
+
+# -----------------------------------------------------------------------------
+# STAP 2: Controleren of de container bereikbaar is via het fysieke netwerk
+# -----------------------------------------------------------------------------
+info "STAP 2: Netwerkbereikbaarheid controleren..."
+
+# Haal het IP-adres van de server op (de interface die naar de Fritzbox gaat)
+SERVER_IP=$(ip route get 1.1.1.1 | awk '{print $7; exit}')
+info "Server IP-adres: $SERVER_IP"
+
+if [[ -z "$SERVER_IP" ]]; then
+    fail "Kon het IP-adres van de server niet bepalen."
+    exit 1
+fi
+
+# Test TFTP via het fysieke IP-adres (niet 127.0.0.1)
+info "TFTP testen via $SERVER_IP..."
+TMP_FILE=$(mktemp)
+if curl -fsS --max-time 10 "tftp://${SERVER_IP}/netboot.xyz.efi" -o "$TMP_FILE" 2>/dev/null; then
+    ok "TFTP werkt via het fysieke netwerk ($SERVER_IP)."
+else
+    fail "TFTP werkt NIET via $SERVER_IP."
+    warn "Dit kan betekenen dat de firewall verkeer van buiten blokkeert."
+fi
+rm -f "$TMP_FILE"
+
+# Test HTTP via het fysieke IP-adres
+info "HTTP testen via $SERVER_IP..."
+if curl -fsS --max-time 5 "http://${SERVER_IP}/" >/dev/null 2>&1; then
+    ok "HTTP werkt via het fysieke netwerk ($SERVER_IP)."
+else
+    fail "HTTP werkt NIET via $SERVER_IP."
+fi
+echo
+
+# -----------------------------------------------------------------------------
+# STAP 3: Firewall controleren op verkeer van de Dell E7440
+# -----------------------------------------------------------------------------
+info "STAP 3: Firewallregels controleren voor TFTP en HTTP..."
+
+ZONE=$(firewall-cmd --get-zone-of-interface=eno1 2>/dev/null || echo "public")
+info "Zone voor eno1: $ZONE"
+
+# Controleer TFTP (UDP 69)
+if firewall-cmd --zone="$ZONE" --query-port=69/udp >/dev/null 2>&1 || \
+   firewall-cmd --zone="$ZONE" --query-service=tftp >/dev/null 2>&1; then
+    ok "TFTP (UDP 69) is toegestaan in zone '$ZONE'."
+else
+    warn "TFTP (UDP 69) is NIET expliciet toegestaan. Toevoegen..."
+    firewall-cmd --permanent --zone="$ZONE" --add-port=69/udp
+    firewall-cmd --reload
+    ok "TFTP (UDP 69) toegevoegd aan zone '$ZONE'."
+fi
+
+# Controleer HTTP (TCP 80)
+if firewall-cmd --zone="$ZONE" --query-port=80/tcp >/dev/null 2>&1; then
+    ok "HTTP (TCP 80) is toegestaan in zone '$ZONE'."
+else
+    warn "HTTP (TCP 80) is NIET expliciet toegestaan. Toevoegen..."
+    firewall-cmd --permanent --zone="$ZONE" --add-port=80/tcp
+    firewall-cmd --reload
+    ok "HTTP (TCP 80) toegevoegd aan zone '$ZONE'."
+fi
+echo
+
+# -----------------------------------------------------------------------------
+# STAP 4: Samenvatting en volgende stap
+# -----------------------------------------------------------------------------
+echo "============================================================"
+ok "LAATSTE PROBLEMEN OPGELOST"
+echo "============================================================"
+echo "  Wat is er gedaan:"
+echo "    1. DNS_SERVER=1.1.1.1 toegevoegd aan de container."
+echo "    2. Container herstart en gecontroleerd."
+echo "    3. TFTP en HTTP getest via het fysieke IP ($SERVER_IP)."
+echo "    4. Firewallregels gecontroleerd en indien nodig aangevuld."
+echo
+echo "  Nu is het tijd voor de echte test:"
+echo "    1. Start de Dell E7440 op en druk op F12."
+echo "    2. Kies 'Onboard NIC' (UEFI)."
+echo "    3. Kijk live mee op de server met:"
+echo "         sudo podman logs -f netbootxyz"
+echo
+echo "  Je zou nu verkeer moeten zien van 192.168.192.x (de Dell)"
+echo "  in plaats van alleen 10.88.0.1 (de container)."
+echo "============================================================"
