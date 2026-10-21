@@ -1,64 +1,17 @@
-henry@deploymentserver:~> sudo bash fix.sh 
+sudo bash fix.sh 
 [sudo] wachtwoord voor henry: 
 ============================================================
-  NETBOOT STACK DIAGNOSE
-  Datum: wo 21 okt 2026 10:33:22 CEST
+  NETBOOT TFTP-PAD FIX
+  Datum: wo 21 okt 2026 10:44:01 CEST
 ============================================================
 
-[INFO] STAP 1: Controleren van host-services (dnsmasq, firewalld, cockpit)...
-[OK]   dnsmasq is actief.
-[OK]   firewalld is actief.
-[OK]   cockpit.socket is actief.
-
-[INFO] STAP 2: Controleren van Podman containers...
-[OK]   Container 'netbootxyz' draait.
-[OK]   Container 'dokuwiki' draait.
-[OK]   Container 'forgejo' draait.
-
-[INFO] STAP 3: Controleren of poorten 69/UDP en 80/TCP luisteren...
-[OK]   Poort 69/UDP (TFTP) luistert.
-[OK]   Poort 80/TCP (HTTP) luistert.
-
-[INFO] STAP 4: Controleren van firewalld regels...
-[INFO] Standaard interface: eno1 (Zone: public)
-[OK]   Firewall staat TFTP (poort 69/UDP) toe in zone 'public'.
-[OK]   Firewall staat DHCP (poort 67/UDP) toe in zone 'public'.
-
-[INFO] STAP 5: Lokaal testen van TFTP-bestanden...
-[FAIL] TFTP: netboot.xyz.efi kon NIET worden opgehaald.
-[FAIL] TFTP: netboot.xyz.kpxe kon NIET worden opgehaald.
-
-[INFO] STAP 6: Specifieke test voor de Dell E7440 UEFI 0xFF bug...
-[INFO] Controleren of de TFTP-map (/srv/tftp) is gekoppeld...
-[OK]   TFTP-map bestaat.
-[FAIL] Standaard bestand 'netboot.xyz.efi' ontbreekt in /srv/tftp.
-[WARN] Workaround bestand met 0xFF teken ontbreekt.
-[INFO]   Dit is waarschijnlijk de oorzaak van de PXE-E23 fout op de Dell E7440.
-[INFO]   Oplossing: maak een kopie met het 0xFF teken aan:
-[INFO]     sudo cp /srv/tftp/netboot.xyz.efi "/srv/tftp/netboot.xyz.efi�"
-[INFO]   Of gebruik het Python commando uit de handleiding.
-
-[INFO] STAP 7: Controleren van dnsmasq PXE-configuratie...
-[OK]   Configuratiebestand /etc/dnsmasq.d/netboot.conf bestaat.
-[OK]   UEFI PXE-service is geconfigureerd.
-       pxe-service=X86-64_EFI, "NETBOOT (EFI)",  "netboot.xyz.efi",  192.168.192.202
-[OK]   Geconfigureerde interface 'eno1' bestaat.
-
-[INFO] STAP 8: Live logs van de netbootxyz container...
-  (Druk op Ctrl+C om te stoppen met meekijken)
-  Start nu de Dell E7440 op om te zien wat er gebeurt...
-------------------------------------------------------------
-dnsmasq-tftp[25]: file /config/menus/netboot.xyz.kpxe not found for 10.88.0.1
-dnsmasq-tftp[25]: file /config/menus/netboot.xyz.kpxe not found for 192.168.192.230
-dnsmasq-tftp[25]: file /config/menus/netboot.xyz.kpxe not found for 192.168.192.230
-dnsmasq-tftp[25]: file /config/menus/netboot.xyz.efi not found for 192.168.192.230
-dnsmasq-tftp[25]: file /config/menus/netboot.xyz.efi not found for 192.168.192.231
-dnsmasq-tftp[25]: file /config/menus/netboot.xyz.efi not found for 192.168.192.231
-dnsmasq-tftp[25]: file /config/menus/netboot.xyz.efi not found for 192.168.192.231
-dnsmasq-tftp[25]: file /config/menus/netboot.xyz.efi not found for 192.168.192.231
-dnsmasq-tftp[25]: file /config/menus/netboot.xyz.efi not found for 10.88.0.1
-dnsmasq-tftp[25]: file /config/menus/netboot.xyz.kpxe not found for 10.88.0.1
-------------------------------------------------------------
-
-[INFO] Diagnose voltooid.
-henry@deploymentserver:~> 
+[INFO] STAP 1: Controleren van mappen en bronbestanden...
+[OK]   TFTP-map /srv/tftp bestaat.
+[OK]   Doelmap /srv/netboot-config/menus bestaat.
+[FAIL] Bronbestand ONTBREEKT: /srv/tftp/netboot.xyz.efi
+[WARN]   Haal dit bestand eerst op, bijvoorbeeld via:
+[WARN]     sudo podman cp netbootxyz:/assets/netboot.xyz.efi /srv/tftp/
+[FAIL] Bronbestand ONTBREEKT: /srv/tftp/netboot.xyz.kpxe
+[WARN]   Haal dit bestand eerst op, bijvoorbeeld via:
+[WARN]     sudo podman cp netbootxyz:/assets/netboot.xyz.kpxe /srv/tftp/
+[FAIL] Niet alle bronbestanden zijn aanwezig. Fix afgebroken.
