@@ -1,261 +1,13 @@
 #!/usr/bin/env bash
 # =============================================================================
-#  NETBOOT STACK INSTALLER VOOR OPENSUSE LEAP
+#  NETBOOT STACK INSTALLER VOOR OPENSUSE LEAP (bijgewerkt)
 # =============================================================================
-#
-#  WAT DIT SCRIPT DOET
-#  -------------------
-#  Dit script installeert en configureert een complete netboot-omgeving op
-#  een openSUSE Leap-server, zonder de bestaande DHCP-server (meestal een
-#  Fritzbox) te vervangen. Na een succesvolle uitvoering kunnen BIOS- en
-#  UEFI-clients in hetzelfde L2-segment via PXE booten en netboot.xyz
-#  gebruiken om besturingssystemen te installeren of te starten.
-#
-#  Het script installeert de volgende componenten:
-#
-#    1. dnsmasq          - Proxy-DHCP: antwoordt uitsluitend op PXE-verzoeken,
-#                          geeft zelf geen IP-adressen uit.
-#    2. netboot.xyz      - TFTP- en HTTP-bootserver in een Podman-container,
-#                          inclusief web-UI.
-#    3. DokuWiki         - Documentatie-wiki in een Podman-container.
-#    4. Forgejo          - Git-forge in een Podman-container.
-#    5. Cockpit          - Grafisch beheer-dashboard op de host, met
-#                          Podman-integratie voor het beheren van containers.
-#
-#  Alle containers worden beheerd via Quadlet: systemd leest declaratieve
-#  .container-bestanden uit /etc/containers/systemd/ en genereert daaruit
-#  transient services. Containers starten automatisch bij het opstarten van
-#  de server en zijn te beheren via systemctl of Cockpit.
-#
-# -----------------------------------------------------------------------------
-#  ARCHITECTUUR
-# -----------------------------------------------------------------------------
-#
-#   ┌─────────────────────────────────────────────────────────────────┐
-#   │  Bestaande DHCP-server (bijv. Fritzbox)                         │
-#   │  - Deelt IP-adressen uit aan alle apparaten                     │
-#   │  - Ondersteunt geen PXE-opties (next-server, boot-filename)     │
-#   └──────────────────┬──────────────────────────────────────────────┘
-#                      │
-#                      │  bestaand L2-netwerk
-#                      │
-#   ┌──────────────────▼──────────────────────────────────────────────┐
-#   │  openSUSE Leap-server (dit script)                              │
-#   │                                                                 │
-#   │  dnsmasq (host-service)                                         │
-#   │   - Luistert passief mee op DHCP-broadcasts                     │
-#   │   - Antwoordt alleen op PXE-verzoeken                           │
-#   │   - Geeft geen IP-adressen uit                                  │
-#   │   - Verwijst clients naar de netboot.xyz-container              │
-#   │                                                                 │
-#   │  netboot.xyz (Podman, PublishPort)                              │
-#   │   - TFTP-server op :69/UDP                                      │
-#   │   - HTTP-server op :80/TCP                                      │
-#   │   - Web-UI op :12080/TCP                                        │
-#   │                                                                 │
-#   │  DokuWiki (Podman)                :12081/TCP                    │
-#   │  Forgejo  (Podman)                :12082/TCP + :2222/TCP (SSH)  │
-#   │  Cockpit  (host-service)          :9090/TCP                     │
-#   └─────────────────────────────────────────────────────────────────┘
-#
-# -----------------------------------------------------------------------------
-#  WAAROM DEZE OPZET
-# -----------------------------------------------------------------------------
-#
-#  Proxy-DHCP in plaats van een tweede DHCP-server.
-#    Een tweede DHCP-server op hetzelfde L2-segment veroorzaakt
-#    IP-conflicten. dnsmasq in proxy-modus antwoordt uitsluitend op
-#    PXE-verzoeken; de bestaande DHCP-server blijft verantwoordelijk voor
-#    IP-uitgifte.
-#
-#  dnsmasq doet geen TFTP.
-#    De netboot.xyz-container bevat een eigen TFTP-server op :69/UDP.
-#    Twee TFTP-servers op dezelfde poort conflicteren.
-#
-#  netboot.xyz gebruikt PublishPort in plaats van host-netwerk.
-#    De container draait als niet-root en kan daardoor niet zelf op
-#    poorten onder 1024 binden. Met PublishPort doet Podman de binding
-#    als root, en met TFTPD_OPTS=--tftp-single-port blijft al het
-#    TFTP-verkeer op poort 69 — dat werkt betrouwbaar via port mapping.
-#
-#  DokuWiki mapt op poort 8080, niet op poort 80.
-#    De officiële dokuwiki/dokuwiki image luistert intern op poort 8080.
-#    Een mapping naar poort 80 levert een container op die draait maar
-#    niet antwoordt. Daarom: PublishPort=12081:8080.
-#
-#  Quadlet in plaats van `podman generate systemd`.
-#    Declaratief, systemd-native, volledig integreerbaar met Cockpit.
-#
-#  Expliciet server-IP in de pxe-service-regel.
-#    De Fritzbox geeft soms zijn eigen IP-adres als TFTP-server door.
-#    Door het server-IP expliciet op te nemen, wordt dit omzeild.
-#
-# -----------------------------------------------------------------------------
-#  GEDRAG VAN HET SCRIPT
-# -----------------------------------------------------------------------------
-#
-#  Veilig herhaalbaar
-#  ------------------
-#  Bestaande configuratiebestanden krijgen een tijdgestempelde back-up
-#  (.bak.YYYYMMDD-HHMMSS) voordat ze worden overschreven.
-#
-#  Bestaande data wordt beschermd
-#  ------------------------------
-#  Bij het instellen van eigenaars op de data-mappen van DokuWiki en
-#  Forgejo wordt onderscheid gemaakt tussen:
-#     * map bestaat niet       → aangemaakt, eigenaar ingesteld
-#     * map bestaat en is leeg → recursief eigenaar ingesteld
-#     * map bestaat met inhoud → alleen top-level eigenaar aangepast,
-#                                met waarschuwing
-#
-#  Rollback bij fouten tijdens installatie
-#  ---------------------------------------
-#  Alle wijzigingen tijdens de installatie worden vastgelegd in een
-#  rollback-stack. Bij een fatale fout wordt de stack in omgekeerde
-#  volgorde uitgevoerd. Rollback-acties zijn getypeerd; geen eval.
-#
-#  Service-state wordt gerespecteerd
-#  ---------------------------------
-#  Voor host-services (dnsmasq, firewalld, cockpit.socket) wordt de
-#  enabled/active-status vastgelegd voordat het script iets wijzigt. Bij
-#  rollback worden alleen wijzigingen teruggedraaid die deze run zelf
-#  heeft aangebracht.
-#
-#  Quadlet-containers
-#  ------------------
-#  Quadlet genereert transient units. `systemctl enable` werkt daar niet
-#  op; de `[Install] WantedBy=multi-user.target` in het .container-bestand
-#  regelt het starten bij boot. Het script gebruikt daarom `systemctl
-#  start` voor containers, en geen enable/disable in de rollback.
-#
-#  Onderscheid tussen fouten tijdens installatie en mislukte eindcontrole
-#  ----------------------------------------------------------------------
-#    Fatale fout tijdens installatie
-#      Het script stopt, voert rollback uit, exit-code 1.
-#    Mislukte eindcontrole
-#      Installatie is technisch klaar, runtime-conditie faalt.
-#      GEEN rollback, exit-code 2. De installatie blijft staan zodat je
-#      de situatie kunt onderzoeken.
-#
-#  Exit-codes
-#  ----------
-#    0   = volledig geslaagd
-#    1   = fatale fout tijdens installatie; rollback uitgevoerd
-#    2   = installatie voltooid, eindcontrole mislukt; geen rollback
-#    130 = onderbroken door gebruiker; rollback uitgevoerd
-#
-#  Eindcontrole
-#  ------------
-#  Na de installatie controleert het script:
-#    * of alle host-services (dnsmasq, cockpit.socket, firewalld) actief zijn
-#    * of alle containers (netbootxyz, dokuwiki, forgejo) draaien
-#    * of de dnsmasq-configuratie syntactisch geldig is
-#    * of poort 69/UDP en poort 80/TCP luisteren
-#    * of de HTTP-root een niet-lege body teruggeeft
-#    * of netboot.xyz.kpxe en netboot.xyz.efi via TFTP opgehaald kunnen
-#      worden
-#
-#  Een succesvolle eindcontrole bewijst dat de server klaar is voor
-#  PXE-clients. Het bewijst niet dat een specifieke client de volledige
-#  bootprocedure kan doorlopen — dat blijft een handmatige test met een
-#  echte BIOS- en UEFI-client.
-#
-# -----------------------------------------------------------------------------
-#  VEREISTEN
-# -----------------------------------------------------------------------------
-#   * openSUSE Leap 15.5 of nieuwer
-#   * Root-toegang
-#   * Minimaal 2 GB RAM, 20 GB vrije schijfruimte
-#   * Internettoegang voor packages en container-images
-#   * De server moet in hetzelfde L2-segment staan als de PXE-clients
-#   * De gekozen netwerkinterface moet een expliciete firewalld-zone hebben
-#
-# -----------------------------------------------------------------------------
-#  POORTEN
-# -----------------------------------------------------------------------------
-#    67/UDP    dnsmasq       Proxy-DHCP
-#    69/UDP    netboot.xyz   TFTP
-#    80/TCP    netboot.xyz   HTTP (iPXE)
-#    4011/UDP  dnsmasq       Alternatieve PXE-poort
-#
-#    2222/TCP  Forgejo       Git SSH
-#    9090/TCP  Cockpit       Dashboard
-#    12080/TCP netboot.xyz   Web-UI
-#    12081/TCP DokuWiki      Webinterface
-#    12082/TCP Forgejo       HTTP
-#
-#  De PXE-poorten (67, 69, 80, 4011) zijn vastgelegd door de PXE-standaard.
-#  De beheer-poorten zijn gekozen buiten de door bekende services gebruikte
-#  ranges (9000-9003 wordt historisch door SonarQube, Hadoop en Tor gebruikt).
-#
-# -----------------------------------------------------------------------------
-#  GEBRUIK
-# -----------------------------------------------------------------------------
-#   sudo ./netboot-stack-installer.sh
-#
-#  Het script is interactief: het toont de beschikbare netwerkinterfaces
-#  en vraagt welke interface op het PXE-netwerk is aangesloten. Daarna
-#  toont het de berekende netwerkgegevens en vraagt om bevestiging.
-#
-# -----------------------------------------------------------------------------
-#  CONTAINER-IMAGES
-# -----------------------------------------------------------------------------
-#  DokuWiki en Forgejo zijn vastgezet op expliciete versietags, zodat deze
-#  componenten reproduceerbaar zijn. De netboot.xyz-image gebruikt de tag
-#  `latest`, omdat de officiële ghcr.io-registry geen nette release-tags
-#  publiceert. netboot.xyz bewaart geen data in de container zelf; een
-#  nieuwe versie kan zonder verlies worden teruggedraaid.
-#
-#  Voordat het script de containers aanmaakt, controleert het met skopeo
-#  of alle tags bereikbaar zijn.
-#
-# -----------------------------------------------------------------------------
-#  NA INSTALLATIE
-# -----------------------------------------------------------------------------
-#   1. Zet het server-IP vast in de bestaande DHCP-server.
-#   2. Test TFTP lokaal:
-#         tftp <server-ip> -c get netboot.xyz.kpxe /tmp/test.kpxe
-#   3. Test een PXE-boot vanaf een BIOS-client.
-#   4. Test een PXE-boot vanaf een UEFI-client.
-#   5. Beheer de containers via Cockpit: https://<server-ip>:9090
-#
-# -----------------------------------------------------------------------------
-#  TROUBLESHOOTING
-# -----------------------------------------------------------------------------
-#
-#  "TFTP timeout" op de client
-#       ss -ulnp | grep :69
-#       podman logs netbootxyz
-#       firewall-cmd --list-all
-#
-#  "no boot filename" op de client
-#       journalctl -u dnsmasq -f
-#       Controleer interface= in /etc/dnsmasq.d/netboot.conf
-#
-#  Container draait niet
-#       systemctl status <naam>.service
-#       podman ps -a
-#       podman logs <naam>
-#
-#  DokuWiki antwoordt niet op 12081
-#       sudo podman inspect dokuwiki --format '{{json .Config.ExposedPorts}}'
-#       Verwacht: {"8080/tcp":{}}
-#       Controleer PublishPort in /etc/containers/systemd/dokuwiki.container
-#
-#  Quadlet-unit start niet
-#       systemctl daemon-reload
-#       systemctl start <naam>.service
-#       journalctl -u <naam>.service -n 50
-#
-#  firewalld start niet of zone ontbreekt
-#       systemctl status firewalld
-#       firewall-cmd --get-zone-of-interface=<iface>
-#       firewall-cmd --permanent --zone=public --add-interface=<iface>
-#       firewall-cmd --reload
-#
-#  IP-adres van de server verandert na reboot
-#       Stel een DHCP-reservering in op de bestaande DHCP-server.
-#
+#  Wijzigingen t.o.v. de oorspronkelijke versie:
+#    - Automatische download van netboot.xyz bootbestanden.
+#    - Automatische kopie naar /srv/netboot-config/menus (TFTP-root van container).
+#    - Automatische 0xFF-workaround voor Dell E7440.
+#    - DNS_SERVER=1.1.1.1 in de netbootxyz Quadlet-unit.
+#    - Eindcontrole test TFTP via het fysieke IP.
 # =============================================================================
 
 set -euo pipefail
@@ -271,11 +23,8 @@ readonly QUADLET_DIR="/etc/containers/systemd"
 readonly DNSMASQ_CONF_DIR="/etc/dnsmasq.d"
 readonly DNSMASQ_CONF="${DNSMASQ_CONF_DIR}/netboot.conf"
 
-# PXE-poorten — vastgelegd door de PXE-standaard
 readonly NETBOOT_TFTP_PORT=69
 readonly NETBOOT_HTTP_PORT=80
-
-# Beheer-poorten — gekozen buiten bekende serviceranges
 readonly NETBOOT_WEB_PORT=12080
 readonly DOKUWIKI_PORT=12081
 readonly FORGEJO_HTTP_PORT=12082
@@ -288,8 +37,12 @@ readonly FORGEJO_IMAGE="codeberg.org/forgejo/forgejo:16.0"
 
 readonly TFTP_DIR="/srv/tftp"
 readonly NETBOOT_CONFIG_DIR="/srv/netboot-config"
+readonly NETBOOT_MENUS_DIR="${NETBOOT_CONFIG_DIR}/menus"
 readonly DOKUWIKI_DATA_DIR="/srv/dokuwiki/data"
 readonly FORGEJO_DATA_DIR="/srv/forgejo/data"
+
+readonly NETBOOT_DOWNLOADS_EFI="https://boot.netboot.xyz/ipxe/netboot.xyz.efi"
+readonly NETBOOT_DOWNLOADS_KPXE="https://boot.netboot.xyz/ipxe/netboot.xyz.kpxe"
 
 readonly CONTAINER_START_TIMEOUT=90
 
@@ -334,7 +87,7 @@ warn()  { _log WARN  "$@"; }
 error() { _log ERROR "$@"; }
 
 # =============================================================================
-#  ROLLBACK — GETYPEERDE ACTIES (geen eval)
+#  ROLLBACK
 # =============================================================================
 
 register_rollback_file()          { RB_TYPE+=("restore_file");    RB_ARG1+=("${1:-}"); RB_ARG2+=("${2:-}"); }
@@ -347,9 +100,7 @@ register_rollback_podman_rm()     { RB_TYPE+=("podman_rm");       RB_ARG1+=("${1
 
 record_service_state() {
     local svc="${1:-}"
-    if [[ -z "$svc" ]]; then
-        return 0
-    fi
+    [[ -z "$svc" ]] && return 0
     local was_enabled=0 was_active=0
     systemctl is-enabled --quiet "$svc" 2>/dev/null && was_enabled=1 || true
     systemctl is-active  --quiet "$svc" 2>/dev/null && was_active=1  || true
@@ -359,87 +110,48 @@ record_service_state() {
 
 restore_service_state() {
     local svc="${1:-}"
-    if [[ -z "$svc" ]]; then
-        return 0
-    fi
+    [[ -z "$svc" ]] && return 0
     local state="${SERVICE_STATE[$svc]:-}"
-    if [[ -z "$state" ]]; then
-        return 0
-    fi
+    [[ -z "$state" ]] && return 0
     local was_enabled="${state%:*}"
     local was_active="${state#*:}"
-    if (( was_enabled == 0 )); then
-        systemctl disable "$svc" 2>/dev/null || true
-    fi
-    if (( was_active == 0 )); then
-        systemctl stop "$svc" 2>/dev/null || true
-    fi
+    (( was_enabled == 0 )) && systemctl disable "$svc" 2>/dev/null || true
+    (( was_active == 0 ))  && systemctl stop "$svc" 2>/dev/null || true
 }
 
 perform_rollback() {
     (( ROLLBACK_DONE == 1 )) && return 0
     ROLLBACK_DONE=1
-    if (( ${#RB_TYPE[@]} == 0 )); then
-        info "Geen rollback-acties geregistreerd."; return 0
-    fi
+    (( ${#RB_TYPE[@]} == 0 )) && { info "Geen rollback-acties."; return 0; }
     info "Rollback gestart (${#RB_TYPE[@]} acties)..."
     local idx
     for (( idx=${#RB_TYPE[@]}-1; idx>=0; idx-- )); do
         local t="${RB_TYPE[$idx]:-}" a1="${RB_ARG1[$idx]:-}" a2="${RB_ARG2[$idx]:-}"
         case "$t" in
-            restore_file)
-                if [[ -n "$a1" && -n "$a2" && -f "$a2" ]]; then
-                    cp -a "$a2" "$a1" && info "  Bestand hersteld: $a1"
-                fi ;;
-            remove_path)
-                if [[ -n "$a1" && -d "$a1" ]]; then
-                    rmdir "$a1" 2>/dev/null && info "  Map verwijderd: $a1"
-                elif [[ -n "$a1" && -e "$a1" ]]; then
-                    rm -f "$a1" && info "  Bestand verwijderd: $a1"
-                fi ;;
-            restore_service)
-                info "  Service-state herstellen: ${a1:-<leeg>}"
-                restore_service_state "$a1" ;;
-            restore_owner)
-                if [[ -n "$a1" && -n "$a2" && -e "$a1" ]]; then
-                    chown "$a2" "$a1" 2>/dev/null && info "  Eigenaar hersteld: $a1 → $a2"
-                fi ;;
-            reload_firewall)
-                firewall-cmd --reload >/dev/null 2>&1 && info "  firewall herladen" ;;
-            daemon_reload)
-                systemctl daemon-reload && info "  systemd daemon-reload" ;;
-            podman_rm)
-                if [[ -n "$a1" ]] && command -v podman >/dev/null 2>&1; then
-                    podman rm -f "$a1" >/dev/null 2>&1 && info "  Container verwijderd: $a1"
-                fi ;;
-            *)
-                warn "  Onbekende rollback-actie: ${t:-<leeg>}" ;;
+            restore_file)   [[ -n "$a1" && -n "$a2" && -f "$a2" ]] && cp -a "$a2" "$a1" && info "  Hersteld: $a1" ;;
+            remove_path)    [[ -d "$a1" ]] && rmdir "$a1" 2>/dev/null && info "  Map weg: $a1" || { [[ -e "$a1" ]] && rm -f "$a1" && info "  Bestand weg: $a1"; } ;;
+            restore_service) info "  Service-state: ${a1:-?}"; restore_service_state "$a1" ;;
+            restore_owner)  [[ -n "$a1" && -n "$a2" && -e "$a1" ]] && chown "$a2" "$a1" 2>/dev/null && info "  Eigenaar: $a1 → $a2" ;;
+            reload_firewall) firewall-cmd --reload >/dev/null 2>&1 && info "  firewall herladen" ;;
+            daemon_reload)  systemctl daemon-reload && info "  daemon-reload" ;;
+            podman_rm)      [[ -n "$a1" ]] && command -v podman >/dev/null && podman rm -f "$a1" >/dev/null 2>&1 && info "  Container weg: $a1" ;;
+            *)              warn "  Onbekende actie: $t" ;;
         esac
     done
     RB_TYPE=(); RB_ARG1=(); RB_ARG2=()
     ok "Rollback voltooid."
 }
 
-die() {
-    error "$@"
-    perform_rollback
-    exit 1
-}
+die() { error "$@"; perform_rollback; exit 1; }
 
 _on_error() {
-    local exit_code=$?
-    local line_no=${1:-?}
-    error "Fout opgetreden op regel ${line_no} (exit ${exit_code})."
+    local ec=$?; local ln=${1:-?}
+    error "Fout op regel ${ln} (exit ${ec})."
     perform_rollback
-    error "Installatie afgebroken. Zie ${LOG_FILE}."
     exit 1
 }
 
-_on_interrupt() {
-    error "Installatie onderbroken door gebruiker."
-    perform_rollback
-    exit 130
-}
+_on_interrupt() { error "Onderbroken."; perform_rollback; exit 130; }
 
 trap '_on_error $LINENO' ERR
 trap '_on_interrupt' INT TERM
@@ -452,21 +164,19 @@ command_exists() { command -v "$1" >/dev/null 2>&1; }
 
 backup_or_register_new() {
     local file="${1:-}"
-    if [[ -z "$file" ]]; then
-        return 0
-    fi
+    [[ -z "$file" ]] && return 0
     if [[ -e "$file" ]]; then
         local backup="${file}.bak.$(date +%Y%m%d-%H%M%S)"
         cp -a "$file" "$backup"
         register_rollback_file "$file" "$backup"
-        info "  Back-up gemaakt: $backup"
+        info "  Back-up: $backup"
     else
         register_rollback_remove "$file"
     fi
 }
 
 # =============================================================================
-#  PURE-BASH NETWERKBERekENING (fallback)
+#  NETWERKBERekENING (pure bash)
 # =============================================================================
 
 prefix_to_netmask() {
@@ -507,17 +217,14 @@ calculate_network() {
 # =============================================================================
 
 require_root() {
-    [[ $EUID -eq 0 ]] || { error "Voer dit script uit als root (sudo $0)."; exit 1; }
+    [[ $EUID -eq 0 ]] || { error "Voer als root uit (sudo $0)."; exit 1; }
 }
 
 require_opensuse_leap() {
-    [[ -f /etc/os-release ]] || { error "/etc/os-release niet gevonden."; exit 1; }
+    [[ -f /etc/os-release ]] || { error "/etc/os-release ontbreekt."; exit 1; }
     # shellcheck disable=SC1091
     source /etc/os-release
-    [[ "${ID:-}" == "opensuse-leap" ]] || {
-        error "Alleen openSUSE Leap wordt ondersteund (gevonden: ${ID:-onbekend})."
-        exit 1
-    }
+    [[ "${ID:-}" == "opensuse-leap" ]] || { error "Alleen openSUSE Leap (gevonden: ${ID:-?})."; exit 1; }
     ok "Distro: ${PRETTY_NAME:-openSUSE Leap}"
 }
 
@@ -525,23 +232,19 @@ require_systemd() { command_exists systemctl || { error "systemd vereist."; exit
 require_zypper()  { command_exists zypper    || { error "zypper vereist.";  exit 1; }; }
 
 # =============================================================================
-#  STAP 0 — PREREQUISITES + IMAGE TAGS
+#  STAP 0 — PREREQUISITES
 # =============================================================================
 
 install_prerequisites() {
     info "[0/9] Prerequisites controleren..."
     if ! command_exists skopeo; then
-        info "  skopeo installeren..."
-        zypper --non-interactive install --no-recommends skopeo \
-            || die "Installatie van skopeo mislukt."
+        zypper --non-interactive install --no-recommends skopeo || die "skopeo mislukt."
     fi
-    command_exists skopeo || die "skopeo ontbreekt na installatie."
-    ok "  Prerequisites aanwezig: skopeo."
+    ok "  skopeo aanwezig."
 
     if ! command_exists ipcalc; then
-        info "  ipcalc installeren (voor netwerkberekening)..."
         zypper --non-interactive install --no-recommends ipcalc >/dev/null 2>&1 \
-            || warn "  ipcalc niet geïnstalleerd — pure-bash fallback wordt gebruikt."
+            || warn "  ipcalc niet geïnstalleerd — pure-bash fallback."
     fi
 }
 
@@ -558,7 +261,7 @@ verify_image_tags() {
 }
 
 # =============================================================================
-#  STAP 1 — NETWERKDETECTIE EN INTERFACEKEUZE
+#  STAP 1 — NETWERKDETECTIE
 # =============================================================================
 
 choose_interface() {
@@ -568,25 +271,21 @@ choose_interface() {
     echo
     read -rp "Welke interface is aangesloten op het PXE-netwerk? " SELECTED_IFACE
     if [[ -z "$SELECTED_IFACE" ]] || ! ip link show "$SELECTED_IFACE" &>/dev/null; then
-        die "Ongeldige netwerkinterface: '${SELECTED_IFACE}'"
+        die "Ongeldige interface: '${SELECTED_IFACE}'"
     fi
     ok "Gekozen interface: ${SELECTED_IFACE}"
 }
 
 validate_interface() {
     local iface="$1"
-
-    SELECTED_IP="$(ip -o -4 addr show dev "$iface" scope global \
-        | awk 'NR==1 {split($4,a,"/"); print a[1]}')"
+    SELECTED_IP="$(ip -o -4 addr show dev "$iface" scope global | awk 'NR==1 {split($4,a,"/"); print a[1]}')"
     local cidr
-    cidr="$(ip -o -4 addr show dev "$iface" scope global \
-        | awk 'NR==1 {print $4}')"
-
+    cidr="$(ip -o -4 addr show dev "$iface" scope global | awk 'NR==1 {print $4}')"
     [[ -n "$SELECTED_IP" && -n "$cidr" ]] || die "Geen IPv4-adres op ${iface}."
 
     local prefix="${cidr#*/}"
     if ! [[ "$prefix" =~ ^[0-9]+$ ]] || (( prefix < 1 || prefix > 32 )); then
-        die "Ongeldige prefix in CIDR: ${cidr}"
+        die "Ongeldige prefix: ${cidr}"
     fi
 
     local netmask="" network=""
@@ -594,22 +293,12 @@ validate_interface() {
         netmask="$(ipcalc -m "$cidr" | awk '/^Netmask:/ {print $2}')"
         network="$(ipcalc -n "$cidr" | awk '/^Network:/ {print $2}' | cut -d/ -f1)"
     fi
-
-    if [[ -z "$netmask" ]]; then
-        netmask="$(prefix_to_netmask "$prefix")"
-        info "  Netmasker via pure-bash fallback: ${netmask}"
-    fi
-    if [[ -z "$network" ]]; then
-        network="$(calculate_network "$SELECTED_IP" "$prefix")"
-        info "  Netwerkadres via pure-bash fallback: ${network}"
-    fi
-
-    [[ -n "$netmask" && -n "$network" ]] \
-        || die "Netwerkadres of netmasker kon niet worden berekend."
+    [[ -z "$netmask" ]] && { netmask="$(prefix_to_netmask "$prefix")"; info "  Netmasker fallback: ${netmask}"; }
+    [[ -z "$network" ]] && { network="$(calculate_network "$SELECTED_IP" "$prefix")"; info "  Netwerk fallback: ${network}"; }
+    [[ -n "$netmask" && -n "$network" ]] || die "Netwerk/netmasker onbekend."
 
     local gateway=""
-    gateway="$(ip route show default dev "$iface" 2>/dev/null \
-        | awk '/default/ {print $3; exit}')"
+    gateway="$(ip route show default dev "$iface" 2>/dev/null | awk '/default/ {print $3; exit}')"
 
     echo
     info "Netwerkconfiguratie van ${iface}:"
@@ -618,12 +307,11 @@ validate_interface() {
     printf "  %-14s %s\n" "CIDR:"         "$cidr"
     printf "  %-14s %s\n" "Netwerkadres:" "$network"
     printf "  %-14s %s\n" "Netmasker:"    "$netmask"
-    printf "  %-14s %s\n" "Gateway:"      "${gateway:-<geen op deze interface>}"
+    printf "  %-14s %s\n" "Gateway:"      "${gateway:-<geen>}"
     echo
-
     local confirm
-    read -rp "Klopt deze configuratie voor het PXE-netwerk? (j/n) " confirm
-    [[ "$confirm" =~ ^[jJ]$ ]] || die "Installatie afgebroken."
+    read -rp "Klopt dit? (j/n) " confirm
+    [[ "$confirm" =~ ^[jJ]$ ]] || die "Afgebroken."
 
     SELECTED_PREFIX="$prefix"
     SELECTED_NETWORK="$network"
@@ -639,14 +327,13 @@ validate_interface() {
 check_port_80() {
     info "Controleren of poort ${NETBOOT_HTTP_PORT}/TCP vrij is..."
     if ss -tlnp 2>/dev/null | grep -q ":${NETBOOT_HTTP_PORT} "; then
-        warn "Poort ${NETBOOT_HTTP_PORT}/TCP is al in gebruik:"
+        warn "Poort ${NETBOOT_HTTP_PORT}/TCP in gebruik:"
         ss -tlnp | grep ":${NETBOOT_HTTP_PORT} " >&2
-        echo
         local cont
         read -rp "Toch doorgaan? (j/n): " cont
         [[ "$cont" =~ ^[jJ]$ ]] || die "Afgebroken."
     else
-        ok "  Poort ${NETBOOT_HTTP_PORT}/TCP is vrij."
+        ok "  Poort ${NETBOOT_HTTP_PORT}/TCP vrij."
     fi
 }
 
@@ -656,7 +343,7 @@ check_port_80() {
 
 install_packages() {
     info "[1/9] Pakketten installeren..."
-    local packages=(cockpit cockpit-podman podman dnsmasq firewalld curl)
+    local packages=(cockpit cockpit-podman podman dnsmasq firewalld curl python3)
     if ! zypper --non-interactive install --no-recommends "${packages[@]}"; then
         die "Installatie van pakketten mislukt."
     fi
@@ -669,7 +356,6 @@ install_packages() {
 
 configure_cockpit() {
     info "[2/9] Cockpit configureren op poort ${COCKPIT_PORT}..."
-
     local override_dir="/etc/systemd/system/cockpit.socket.d"
     mkdir -p "$override_dir"
     local override_file="${override_dir}/override.conf"
@@ -703,60 +389,92 @@ EOF
     register_rollback_daemon_reload
 
     systemctl daemon-reload
-    systemctl enable --now cockpit.socket || die "Cockpit kon niet worden gestart."
+    systemctl enable --now cockpit.socket || die "Cockpit start mislukt."
     ok "Cockpit actief op poort ${COCKPIT_PORT}."
 }
 
 # =============================================================================
-#  STAP 5 — MAPPEN (data-bescherming)
+#  STAP 5 — MAPPEN
 # =============================================================================
 
 ensure_ownership() {
     local path="$1" uid="$2" gid="$3"
     local target="${uid}:${gid}"
-
     if [[ ! -d "$path" ]]; then
         mkdir -p "$path"
         chown "$target" "$path"
         register_rollback_remove "$path"
-        ok "  $path aangemaakt en eigenaar ingesteld op $target."
+        ok "  $path aangemaakt ($target)."
         return 0
     fi
-
-    local current_owner
-    current_owner="$(stat -c '%u:%g' "$path")"
-
-    if [[ "$current_owner" == "$target" ]]; then
-        ok "  $path heeft al eigenaar $target."
-        return 0
-    fi
-
-    local content_count
-    content_count=$(find "$path" -mindepth 1 -maxdepth 1 2>/dev/null | wc -l)
-
+    local current_owner; current_owner="$(stat -c '%u:%g' "$path")"
+    [[ "$current_owner" == "$target" ]] && { ok "  $path heeft al $target."; return 0; }
+    local content_count; content_count=$(find "$path" -mindepth 1 -maxdepth 1 2>/dev/null | wc -l)
     if (( content_count == 0 )); then
-        info "  $path is leeg; recursief chown naar $target."
+        info "  $path leeg; recursief chown → $target."
         chown -R "$target" "$path"
-        register_rollback_owner "$path" "$current_owner"
     else
-        warn "  $path bevat al ${content_count} item(s); recursief chown wordt NIET uitgevoerd."
-        warn "  Huidige eigenaar: $current_owner, gewenst: $target"
-        warn "  Alleen de top-level map wordt aangepast. Corrigeer indien nodig handmatig:"
-        warn "    chown -R $target $path"
+        warn "  $path bevat ${content_count} item(s); alleen top-level chown."
         chown "$target" "$path"
-        register_rollback_owner "$path" "$current_owner"
     fi
+    register_rollback_owner "$path" "$current_owner"
 }
 
 create_directories() {
     info "[3/9] Mappenstructuur aanmaken..."
-
-    ensure_ownership "$TFTP_DIR"            root root
-    ensure_ownership "$NETBOOT_CONFIG_DIR"  root root
-    ensure_ownership "$DOKUWIKI_DATA_DIR"   33   33
-    ensure_ownership "$FORGEJO_DATA_DIR"    1000 1000
-
+    ensure_ownership "$TFTP_DIR"             root root
+    ensure_ownership "$NETBOOT_CONFIG_DIR"   root root
+    ensure_ownership "$NETBOOT_MENUS_DIR"    root root
+    ensure_ownership "$DOKUWIKI_DATA_DIR"    33   33
+    ensure_ownership "$FORGEJO_DATA_DIR"     1000 1000
     ok "Mappenstructuur gereed."
+}
+
+# =============================================================================
+#  STAP 5b — NETBOOT.XYZ BOOTBESTANDEN
+# =============================================================================
+
+download_netboot_files() {
+    info "[3b/9] netboot.xyz bootbestanden downloaden..."
+
+    local f url
+    for pair in "netboot.xyz.efi:${NETBOOT_DOWNLOADS_EFI}" "netboot.xyz.kpxe:${NETBOOT_DOWNLOADS_KPXE}"; do
+        f="${pair%%:*}"; url="${pair#*:}"
+        if [[ -s "${TFTP_DIR}/${f}" ]]; then
+            ok "  ${f} bestaat al ($(stat -c%s "${TFTP_DIR}/${f}") bytes)."
+            continue
+        fi
+        info "  Downloaden: ${f}..."
+        if curl -fL --retry 3 --connect-timeout 15 -o "${TFTP_DIR}/${f}" "$url"; then
+            ok "  ${f} gedownload ($(stat -c%s "${TFTP_DIR}/${f}") bytes)."
+        else
+            die "  Downloaden van ${f} mislukt."
+        fi
+    done
+}
+
+deploy_netboot_files() {
+    info "[3c/9] Bootbestanden naar TFTP-root van container kopiëren..."
+    local f
+    for f in netboot.xyz.efi netboot.xyz.kpxe; do
+        [[ -s "${TFTP_DIR}/${f}" ]] || die "Bronbestand ontbreekt: ${TFTP_DIR}/${f}"
+        cp -f "${TFTP_DIR}/${f}" "${NETBOOT_MENUS_DIR}/${f}" \
+            && ok "  Gekopieerd: ${f}" \
+            || die "  Kopiëren mislukt: ${f}"
+    done
+
+    info "  0xFF-workaround aanmaken voor Dell E7440..."
+    if python3 - "${NETBOOT_MENUS_DIR}/netboot.xyz.efi" <<'PYEOF'
+import sys, shutil
+src = sys.argv[1]
+dst = src + '\xff'
+shutil.copyfile(src, dst)
+PYEOF
+    then
+        ok "  Workaround aangemaakt."
+    else
+        warn "  0xFF-workaround mislukt (niet fataal)."
+    fi
 }
 
 # =============================================================================
@@ -767,29 +485,20 @@ verify_dnsmasq_effective_config() {
     grep -Eq '^[[:space:]]*conf-dir=/etc/dnsmasq\.d([,/[:space:]]|$)' /etc/dnsmasq.conf \
         || die "/etc/dnsmasq.conf leest /etc/dnsmasq.d niet in."
     ok "  /etc/dnsmasq.conf bevat conf-dir=/etc/dnsmasq.d/."
-
     [[ -f "$DNSMASQ_CONF" ]] || die "$DNSMASQ_CONF bestaat niet."
     [[ "$DNSMASQ_CONF" == *.conf ]] || die "$DNSMASQ_CONF matcht *.conf niet."
-
-    dnsmasq --test >/dev/null 2>&1 \
-        || { error "dnsmasq --test faalde:"; dnsmasq --test 2>&1 >&2; die "hoofdconfig ongeldig."; }
+    dnsmasq --test >/dev/null 2>&1 || { dnsmasq --test 2>&1 >&2; die "hoofdconfig ongeldig."; }
     ok "  dnsmasq hoofdconfiguratie geldig."
-
-    dnsmasq --test -C "$DNSMASQ_CONF" >/dev/null 2>&1 \
-        || { error "dnsmasq --test -C faalde:"; dnsmasq --test -C "$DNSMASQ_CONF" 2>&1 >&2; die "$DNSMASQ_CONF ongeldig."; }
-    ok "  $DNSMASQ_CONF is syntactisch geldig."
+    dnsmasq --test -C "$DNSMASQ_CONF" >/dev/null 2>&1 || { dnsmasq --test -C "$DNSMASQ_CONF" 2>&1 >&2; die "$DNSMASQ_CONF ongeldig."; }
+    ok "  $DNSMASQ_CONF syntactisch geldig."
 }
 
 configure_dnsmasq() {
     info "[4/9] dnsmasq configureren als proxy-DHCP..."
-
     mkdir -p "$DNSMASQ_CONF_DIR"
     backup_or_register_new "$DNSMASQ_CONF"
-
     cat > "$DNSMASQ_CONF" <<EOF
-# =============================================================================
-# Proxy-DHCP voor netboot.xyz  (gegenereerd door ${SCRIPT_NAME})
-# =============================================================================
+# Proxy-DHCP voor netboot.xyz (gegenereerd door ${SCRIPT_NAME})
 interface=${SELECTED_IFACE}
 bind-dynamic
 log-dhcp
@@ -798,18 +507,14 @@ pxe-service=x86PC,      "NETBOOT (BIOS)", "netboot.xyz.kpxe", ${SELECTED_IP}
 pxe-service=X86-64_EFI, "NETBOOT (EFI)",  "netboot.xyz.efi",  ${SELECTED_IP}
 # GEEN enable-tftp: TFTP wordt door de netboot.xyz container afgehandeld.
 EOF
-
     verify_dnsmasq_effective_config
-
     record_service_state dnsmasq
     register_rollback_service dnsmasq
-
     if ! systemctl enable --now dnsmasq; then
-        error "dnsmasq kon niet worden gestart."
         journalctl -u dnsmasq -n 50 --no-pager
         die "dnsmasq start mislukt."
     fi
-    systemctl is-active --quiet dnsmasq || die "dnsmasq is niet actief na starten."
+    systemctl is-active --quiet dnsmasq || die "dnsmasq niet actief."
     ok "dnsmasq actief als proxy-DHCP op ${SELECTED_IFACE}."
 }
 
@@ -819,42 +524,33 @@ EOF
 
 ensure_firewalld() {
     info "[4b/9] firewalld controleren en activeren..."
-
     record_service_state firewalld
     register_rollback_service firewalld
-
     if ! systemctl enable --now firewalld; then
-        error "firewalld kon niet worden gestart."
         journalctl -u firewalld -n 30 --no-pager
         die "firewalld start mislukt."
     fi
-    firewall-cmd --state >/dev/null 2>&1 || die "firewalld is niet actief."
+    firewall-cmd --state >/dev/null 2>&1 || die "firewalld niet actief."
     ok "  firewalld actief en enabled."
 }
 
 configure_firewall() {
     info "[5/9] Firewall configureren..."
-
     local zone=""
     zone="$(firewall-cmd --get-zone-of-interface="$SELECTED_IFACE" 2>/dev/null || true)"
-
     if [[ -z "$zone" || "$zone" == "no zone" ]]; then
-        error "Interface ${SELECTED_IFACE} is niet aan een firewalld-zone toegewezen."
-        error "Wijs eerst een zone toe:"
+        error "Interface ${SELECTED_IFACE} heeft geen firewalld-zone."
         error "  firewall-cmd --permanent --zone=public --add-interface=${SELECTED_IFACE}"
         error "  firewall-cmd --reload"
-        die "Geen expliciete firewalld-zone voor ${SELECTED_IFACE}."
+        die "Geen zone voor ${SELECTED_IFACE}."
     fi
     ok "Zone voor ${SELECTED_IFACE}: ${zone}"
-
     if [[ "$zone" == "trusted" ]]; then
-        warn "Zone 'trusted' opent ALLE poorten voor dit netwerk."
+        warn "Zone 'trusted' opent ALLE poorten."
         local cont
         read -rp "Toch doorgaan? (j/n): " cont
         [[ "$cont" =~ ^[jJ]$ ]] || die "Afgebroken."
     fi
-
-    warn "Beheerpoorten (12080-12082, 2222, 9090) worden op de PXE-interface geopend."
 
     local zone_file="/etc/firewalld/zones/${zone}.xml"
     if [[ -f "$zone_file" ]]; then
@@ -874,8 +570,7 @@ configure_firewall() {
     firewall-cmd --permanent --zone="$zone" --add-port="${FORGEJO_HTTP_PORT}/tcp" >/dev/null
     firewall-cmd --permanent --zone="$zone" --add-port="${FORGEJO_SSH_PORT}/tcp"  >/dev/null
     firewall-cmd --permanent --zone="$zone" --add-port="${COCKPIT_PORT}/tcp"      >/dev/null
-
-    firewall-cmd --reload || die "Firewall kon niet worden herladen."
+    firewall-cmd --reload || die "Firewall herladen mislukt."
     ok "Firewallregels toegepast op zone '${zone}'."
 }
 
@@ -887,13 +582,6 @@ create_quadlet_units() {
     info "[6/9] Quadlet-units aanmaken..."
     mkdir -p "$QUADLET_DIR"
 
-    # -------------------------------------------------------------------------
-    # netboot.xyz — TFTP + HTTP + web UI via PublishPort
-    # -------------------------------------------------------------------------
-    # De container draait als niet-root en kan niet zelf op poorten onder
-    # 1024 binden. Met PublishPort doet Podman de binding als root. Met
-    # TFTPD_OPTS=--tftp-single-port blijft al het TFTP-verkeer op poort 69,
-    # wat betrouwbaar werkt via port mapping.
     local unit_netboot="${QUADLET_DIR}/netbootxyz.container"
     backup_or_register_new "$unit_netboot"
     cat > "$unit_netboot" <<EOF
@@ -912,6 +600,7 @@ PublishPort=${NETBOOT_WEB_PORT}:3000
 Volume=${TFTP_DIR}:/assets:Z
 Volume=${NETBOOT_CONFIG_DIR}:/config:Z
 Environment=TFTPD_OPTS=--tftp-single-port
+Environment=DNS_SERVER=1.1.1.1
 
 [Service]
 Restart=always
@@ -921,12 +610,6 @@ RestartSec=10
 WantedBy=multi-user.target
 EOF
 
-    # -------------------------------------------------------------------------
-    # DokuWiki — interne poort 8080, niet 80
-    # -------------------------------------------------------------------------
-    # De officiële dokuwiki/dokuwiki image luistert intern op poort 8080.
-    # Een mapping naar poort 80 levert een container op die draait maar
-    # niet antwoordt. Daarom: PublishPort=12081:8080.
     local unit_doku="${QUADLET_DIR}/dokuwiki.container"
     backup_or_register_new "$unit_doku"
     cat > "$unit_doku" <<EOF
@@ -950,9 +633,6 @@ RestartSec=10
 WantedBy=multi-user.target
 EOF
 
-    # -------------------------------------------------------------------------
-    # Forgejo
-    # -------------------------------------------------------------------------
     local unit_forgejo="${QUADLET_DIR}/forgejo.container"
     backup_or_register_new "$unit_forgejo"
     cat > "$unit_forgejo" <<EOF
@@ -985,20 +665,10 @@ EOF
 # =============================================================================
 #  STAP 9 — CONTAINERS STARTEN
 # =============================================================================
-#
-# Quadlet genereert transient units. `systemctl enable` werkt daar niet op;
-# de `[Install] WantedBy=multi-user.target` in het .container-bestand
-# regelt het starten bij boot. Daarom: `systemctl start`, niet `enable`.
-#
-# Ook geen record_service_state voor containers: een transient unit heeft
-# geen enable/disable-state, en bij rollback wordt de .container-file zelf
-# teruggezet, wat de unit laat verdwijnen na daemon-reload.
 
 wait_for_service() {
     local svc="${1:-}" timeout="${2:-$CONTAINER_START_TIMEOUT}" waited=0
-    if [[ -z "$svc" ]]; then
-        return 1
-    fi
+    [[ -z "$svc" ]] && return 1
     while (( waited < timeout )); do
         systemctl is-active --quiet "$svc" && return 0
         sleep 3; (( waited += 3 ))
@@ -1014,8 +684,6 @@ start_containers() {
     local START_FAILED=0 ctr=""
     for ctr in netbootxyz dokuwiki forgejo; do
         register_rollback_podman_rm "$ctr"
-
-        # systemctl start — NIET enable --now (transient unit)
         if ! systemctl start "${ctr}.service" 2>/dev/null; then
             error "  ${ctr}: starten mislukt."
             journalctl -u "${ctr}.service" -n 30 --no-pager || true
@@ -1023,7 +691,6 @@ start_containers() {
             START_FAILED=1
             continue
         fi
-
         if wait_for_service "${ctr}.service" "$CONTAINER_START_TIMEOUT"; then
             ok "  ${ctr}: actief."
         else
@@ -1033,10 +700,7 @@ start_containers() {
             START_FAILED=1
         fi
     done
-
-    if (( START_FAILED != 0 )); then
-        die "Een of meer containers konden niet worden gestart."
-    fi
+    (( START_FAILED != 0 )) && die "Een of meer containers faalden."
 }
 
 # =============================================================================
@@ -1047,37 +711,20 @@ verify_installation() {
     info "[8/9] Eindcontroles uitvoeren..."
     local FAILED=0
 
-    # Host-services
     local svc=""
     for svc in dnsmasq cockpit.socket firewalld; do
-        if systemctl is-active --quiet "$svc"; then
-            ok "  $svc: actief"
-        else
-            error "  $svc: NIET actief"
-            FAILED=1
-        fi
+        systemctl is-active --quiet "$svc" && ok "  $svc: actief" || { error "  $svc: NIET actief"; FAILED=1; }
     done
 
-    # Containers — via podman ps, niet via systemctl is-active
-    # (Quadlet-units kunnen "activating" tonen terwijl de container al draait)
     local ctr=""
     for ctr in netbootxyz dokuwiki forgejo; do
-        if podman ps --format '{{.Names}}' 2>/dev/null | grep -q "^${ctr}$"; then
-            ok "  container ${ctr}: draait"
-        else
-            error "  container ${ctr}: draait NIET"
-            FAILED=1
-        fi
+        podman ps --format '{{.Names}}' 2>/dev/null | grep -q "^${ctr}$" && ok "  container ${ctr}: draait" || { error "  container ${ctr}: draait NIET"; FAILED=1; }
     done
 
-    dnsmasq --test >/dev/null 2>&1 \
-        || { error "  dnsmasq --test: configuratie ongeldig."; FAILED=1; }
+    dnsmasq --test >/dev/null 2>&1 || { error "  dnsmasq --test faalt."; FAILED=1; }
 
-    ss -ulnp 2>/dev/null | grep -qE '(:|\])69[[:space:]]' \
-        || { error "  Geen luisterende TFTP-service op UDP-poort 69."; FAILED=1; }
-
-    ss -tlnp 2>/dev/null | grep -qE '(:|\])80[[:space:]]' \
-        || { error "  Geen luisterende HTTP-service op TCP-poort 80."; FAILED=1; }
+    ss -ulnp 2>/dev/null | grep -qE '(:|\])69[[:space:]]' || { error "  Geen TFTP op UDP 69."; FAILED=1; }
+    ss -tlnp 2>/dev/null | grep -qE '(:|\])80[[:space:]]' || { error "  Geen HTTP op TCP 80."; FAILED=1; }
 
     local body=""
     if body="$(curl -fsS --max-time 5 "http://127.0.0.1/" 2>/dev/null)" && [[ -n "$body" ]]; then
@@ -1087,18 +734,30 @@ verify_installation() {
         FAILED=1
     fi
 
+    # TFTP lokaal via 127.0.0.1
     local f="" tmp=""
     tmp="$(mktemp)"
     for f in netboot.xyz.kpxe netboot.xyz.efi; do
-        if curl -fsS --max-time 10 "tftp://127.0.0.1/${f}" -o "$tmp" 2>/dev/null \
-            && [[ -s "$tmp" ]]; then
-            ok "  TFTP: ${f} opgehaald ($(stat -c%s "$tmp") bytes)."
+        if curl -fsS --max-time 10 "tftp://127.0.0.1/${f}" -o "$tmp" 2>/dev/null && [[ -s "$tmp" ]]; then
+            ok "  TFTP (127.0.0.1): ${f} opgehaald ($(stat -c%s "$tmp") bytes)."
         else
-            error "  TFTP: ${f} niet opgehaald."
+            error "  TFTP (127.0.0.1): ${f} NIET opgehaald."
             FAILED=1
         fi
     done
     rm -f "$tmp"
+
+    # TFTP via het fysieke IP (realistischer)
+    if [[ -n "${SELECTED_IP:-}" ]]; then
+        tmp="$(mktemp)"
+        if curl -fsS --max-time 10 "tftp://${SELECTED_IP}/netboot.xyz.efi" -o "$tmp" 2>/dev/null && [[ -s "$tmp" ]]; then
+            ok "  TFTP (${SELECTED_IP}): netboot.xyz.efi opgehaald ($(stat -c%s "$tmp") bytes)."
+        else
+            warn "  TFTP (${SELECTED_IP}): niet bereikbaar — controleer firewall."
+            FAILED=1
+        fi
+        rm -f "$tmp"
+    fi
 
     return "$FAILED"
 }
@@ -1118,10 +777,12 @@ print_summary_success() {
     echo "  Netmasker      : ${SELECTED_NETMASK}"
     echo "  Gateway        : ${SELECTED_GATEWAY:-<geen>}"
     echo
-    echo "  Container-images:"
-    echo "    netboot.xyz : ${NETBOOT_IMAGE}"
-    echo "    DokuWiki    : ${DOKUWIKI_IMAGE}"
-    echo "    Forgejo     : ${FORGEJO_IMAGE}"
+    echo "  Bootbestanden:"
+    echo "    ${TFTP_DIR}/netboot.xyz.efi"
+    echo "    ${TFTP_DIR}/netboot.xyz.kpxe"
+    echo "    ${NETBOOT_MENUS_DIR}/netboot.xyz.efi"
+    echo "    ${NETBOOT_MENUS_DIR}/netboot.xyz.kpxe"
+    echo "    ${NETBOOT_MENUS_DIR}/netboot.xyz.efi<0xFF>  (Dell workaround)"
     echo
     echo "  Toegang:"
     echo "    Cockpit     : https://${SELECTED_IP}:${COCKPIT_PORT}"
@@ -1135,9 +796,9 @@ print_summary_success() {
     echo "------------------------------------------------------------"
     echo "  Volgende stappen:"
     echo "    1. Zet een DHCP-reservering voor ${SELECTED_IP} in de Fritzbox."
-    echo "    2. Test TFTP:  tftp ${SELECTED_IP} -c get netboot.xyz.kpxe /tmp/test.kpxe"
-    echo "    3. Test PXE-boot vanaf een BIOS-client."
-    echo "    4. Test PXE-boot vanaf een UEFI-client."
+    echo "    2. Test PXE-boot vanaf een BIOS-client."
+    echo "    3. Test PXE-boot vanaf een UEFI-client (bv. Dell E7440)."
+    echo "    4. Live logs: sudo podman logs -f netbootxyz"
     echo "============================================================"
     echo
 }
@@ -1145,12 +806,9 @@ print_summary_success() {
 print_summary_failure() {
     echo
     echo "============================================================"
-    echo "  Installatie technisch VOLTOOID, eindcontrole MISLUKT"
+    echo "  Installatie VOLTOOID, eindcontrole MISLUKT"
     echo "============================================================"
-    echo "  Bewuste keuze: er is GEEN rollback uitgevoerd."
-    echo "  De installatie is blijven staan zodat je de situatie kunt"
-    echo "  onderzoeken. Herstart een falende container of service en"
-    echo "  draai daarna de eindcontrole handmatig opnieuw."
+    echo "  GEEN rollback uitgevoerd. Onderzoek de situatie handmatig."
     echo
     echo "  Logbestand     : ${LOG_FILE}"
     echo
@@ -1161,20 +819,6 @@ print_summary_failure() {
     echo "    podman logs <container>"
     echo "    ss -ulnp | grep :69"
     echo "    ss -tlnp | grep :80"
-    echo "    curl -I http://127.0.0.1/"
-    echo
-    echo "  Herstarten:"
-    echo "    systemctl restart dnsmasq"
-    echo "    systemctl restart netbootxyz.service"
-    echo "    systemctl restart dokuwiki.service"
-    echo "    systemctl restart forgejo.service"
-    echo
-    echo "  Handmatig terugrollen (indien gewenst):"
-    echo "    Herstel de .bak.<tijdstempel>-bestanden uit de betreffende"
-    echo "    mappen en draai 'systemctl daemon-reload && firewall-cmd --reload'."
-    echo "    Zie ${LOG_FILE} voor de gemaakte back-ups."
-    echo
-    echo "  Exit-code 2 — onderscheiden van exit 1 (fatale fout + rollback)."
     echo "============================================================"
     echo
 }
@@ -1207,6 +851,8 @@ main() {
     install_packages
     configure_cockpit
     create_directories
+    download_netboot_files
+    deploy_netboot_files
     configure_dnsmasq
     ensure_firewalld
     configure_firewall
