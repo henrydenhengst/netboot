@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
 # =============================================================================
-#  FIX SCRIPT VOOR NETBOOT.XYZ TFTP-PAD PROBLEEM (openSUSE Leap)
+#  VOLLEDIGE OPLOSSING VOOR NETBOOT.XYZ TFTP-PROBLEEM
 # =============================================================================
-#  Probleem: De netbootxyz-container zoekt TFTP-bestanden in /config/menus/
-#            terwijl het installatiescript /srv/tftp aan /assets koppelt.
-#  Oplossing: Kopieer de bootbestanden naar /srv/netboot-config/menus/ en
-#             herstart de container. Daarna wordt de werking geverifieerd.
+#  Dit script lost het probleem in één keer op:
+#    1. Downloadt de ontbrekende bootbestanden van de officiële server.
+#    2. Plaatst ze in /srv/tftp (host) én in /srv/netboot-config/menus
+#       (de map die de container daadwerkelijk gebruikt voor TFTP).
+#    3. Herstart de netbootxyz-container.
+#    4. Verifieert dat TFTP lokaal werkt.
+#    5. Maakt optioneel de 0xFF-workaround aan voor de Dell E7440.
 # =============================================================================
 
 set -uo pipefail
@@ -26,78 +29,85 @@ if [[ $EUID -ne 0 ]]; then
     exit 1
 fi
 
-# Paden (pas aan indien jouw script andere paden gebruikt)
+# -----------------------------------------------------------------------------
+# Configuratie
+# -----------------------------------------------------------------------------
 TFTP_DIR="/srv/tftp"
 CONFIG_DIR="/srv/netboot-config"
 MENUS_DIR="${CONFIG_DIR}/menus"
 CONTAINER="netbootxyz"
 
-# Te kopiëren bestanden
-FILES=("netboot.xyz.efi" "netboot.xyz.kpxe")
+# Officiële download-URL's (rolling release)
+declare -A DOWNLOADS=(
+    ["netboot.xyz.efi"]="https://boot.netboot.xyz/ipxe/netboot.xyz.efi"
+    ["netboot.xyz.kpxe"]="https://boot.netboot.xyz/ipxe/netboot.xyz.kpxe"
+)
 
 echo "============================================================"
-echo "  NETBOOT TFTP-PAD FIX"
+echo "  NETBOOT.XYZ VOLLEDIGE OPLOSSING"
 echo "  Datum: $(date)"
 echo "============================================================"
 echo
 
 # -----------------------------------------------------------------------------
-# STAP 1: Controleer of de benodigde mappen en bestanden bestaan
+# STAP 1: Mappen aanmaken
 # -----------------------------------------------------------------------------
-info "STAP 1: Controleren van mappen en bronbestanden..."
-
-if [[ ! -d "$TFTP_DIR" ]]; then
-    fail "TFTP-map $TFTP_DIR bestaat niet. Is het installatiescript uitgevoerd?"
-    exit 1
-fi
-ok "TFTP-map $TFTP_DIR bestaat."
-
-if [[ ! -d "$MENUS_DIR" ]]; then
-    warn "Doelmap $MENUS_DIR bestaat nog niet. Deze wordt aangemaakt."
-    mkdir -p "$MENUS_DIR" || { fail "Kon $MENUS_DIR niet aanmaken."; exit 1; }
-fi
-ok "Doelmap $MENUS_DIR bestaat."
-
-for f in "${FILES[@]}"; do
-    if [[ -f "${TFTP_DIR}/${f}" ]]; then
-        ok "Bronbestand gevonden: ${TFTP_DIR}/${f}"
-    else
-        fail "Bronbestand ONTBREEKT: ${TFTP_DIR}/${f}"
-        warn "  Haal dit bestand eerst op, bijvoorbeeld via:"
-        warn "    sudo podman cp ${CONTAINER}:/assets/${f} ${TFTP_DIR}/"
-        MISSING=1
-    fi
-done
-
-if [[ "${MISSING:-0}" -eq 1 ]]; then
-    fail "Niet alle bronbestanden zijn aanwezig. Fix afgebroken."
-    exit 1
-fi
+info "STAP 1: Mappen controleren/aanmaken..."
+mkdir -p "$TFTP_DIR" "$MENUS_DIR" || { fail "Kon mappen niet aanmaken."; exit 1; }
+ok "Mappen gereed: $TFTP_DIR en $MENUS_DIR"
 echo
 
 # -----------------------------------------------------------------------------
-# STAP 2: Kopieer de bestanden naar de map die de container gebruikt
+# STAP 2: Bootbestanden downloaden (indien nog niet aanwezig)
 # -----------------------------------------------------------------------------
-info "STAP 2: Bootbestanden kopiëren naar ${MENUS_DIR}..."
-for f in "${FILES[@]}"; do
+info "STAP 2: Bootbestanden downloaden..."
+for f in "${!DOWNLOADS[@]}"; do
+    if [[ -s "${TFTP_DIR}/${f}" ]]; then
+        ok "  ${f} bestaat al ($(stat -c%s "${TFTP_DIR}/${f}") bytes). Overslaan."
+        continue
+    fi
+    info "  Downloaden: ${f}..."
+    if curl -fL --retry 3 --connect-timeout 15 -o "${TFTP_DIR}/${f}" "${DOWNLOADS[$f]}"; then
+        SIZE=$(stat -c%s "${TFTP_DIR}/${f}")
+        ok "  ${f} gedownload (${SIZE} bytes)."
+    else
+        fail "  Downloaden van ${f} mislukt."
+        exit 1
+    fi
+done
+echo
+
+# -----------------------------------------------------------------------------
+# STAP 3: Bestanden kopiëren naar de map die de container gebruikt
+# -----------------------------------------------------------------------------
+info "STAP 3: Bestanden kopiëren naar ${MENUS_DIR}..."
+for f in "${!DOWNLOADS[@]}"; do
     cp -f "${TFTP_DIR}/${f}" "${MENUS_DIR}/${f}" \
         && ok "  Gekopieerd: ${f}" \
         || { fail "  Kopiëren mislukt: ${f}"; exit 1; }
 done
+
+# 0xFF-workaround voor de Dell E7440 meteen aanmaken
+info "  Workaround aanmaken voor Dell E7440 (0xFF-teken)..."
+python3 - "${MENUS_DIR}/netboot.xyz.efi" <<'PYEOF'
+import sys, shutil
+src = sys.argv[1]
+dst = src + '\xff'
+shutil.copyfile(src, dst)
+print(f"[OK]   Workaround aangemaakt: {dst.encode('utf-8', 'backslashreplace').decode()}")
+PYEOF
+
 echo
 
 # -----------------------------------------------------------------------------
-# STAP 3: Container herstarten
+# STAP 4: Container herstarten
 # -----------------------------------------------------------------------------
-info "STAP 3: Container '${CONTAINER}' herstarten..."
-if systemctl restart "${CONTAINER}.service"; then
-    ok "Container herstart aangevraagd."
-else
+info "STAP 4: Container '${CONTAINER}' herstarten..."
+if ! systemctl restart "${CONTAINER}.service"; then
     fail "Herstarten van ${CONTAINER}.service mislukt."
     exit 1
 fi
 
-# Wacht tot de container weer draait (max 60 s)
 info "Wachten tot de container actief is..."
 for i in {1..20}; do
     if podman ps --format '{{.Names}}' 2>/dev/null | grep -q "^${CONTAINER}$"; then
@@ -114,13 +124,13 @@ done
 echo
 
 # -----------------------------------------------------------------------------
-# STAP 4: TFTP lokaal testen
+# STAP 5: TFTP lokaal verifiëren
 # -----------------------------------------------------------------------------
-info "STAP 4: TFTP lokaal testen (via 127.0.0.1)..."
+info "STAP 5: TFTP lokaal verifiëren..."
 TMP_FILE=$(mktemp)
 TFTP_OK=0
-for f in "${FILES[@]}"; do
-    if curl -fsS --max-time 15 "tftp://127.0.0.1/${f}" -o "$TMP_FILE" 2>/dev/null; then
+for f in "${!DOWNLOADS[@]}"; do
+    if curl -fsS --max-time 20 "tftp://127.0.0.1/${f}" -o "$TMP_FILE" 2>/dev/null; then
         SIZE=$(stat -c%s "$TMP_FILE")
         ok "  TFTP: ${f} succesvol opgehaald (${SIZE} bytes)."
         TFTP_OK=1
@@ -132,20 +142,24 @@ rm -f "$TMP_FILE"
 echo
 
 # -----------------------------------------------------------------------------
-# STAP 5: Eindconclusie
+# STAP 6: Eindconclusie
 # -----------------------------------------------------------------------------
 if [[ "$TFTP_OK" -eq 1 ]]; then
-    ok "TFTP werkt nu lokaal. De Dell E7440 zou nu moeten kunnen booten."
+    echo "============================================================"
+    ok "OPLOSSING VOLTOOID"
+    echo "============================================================"
+    echo "  De TFTP-server werkt nu correct en de bestanden zijn"
+    echo "  aanwezig, inclusief de 0xFF-workaround voor de Dell E7440."
     echo
-    info "Als de Dell E7440 nog steeds een fout geeft, is dat de bekende"
-    info "UEFI 0xFF-bug. Maak dan de workaround aan met:"
-    info "  sudo cp ${MENUS_DIR}/netboot.xyz.efi \"${MENUS_DIR}/netboot.xyz.efi$(printf '\\xff')\""
-    echo
-    info "Start nu de Dell E7440 op en bekijk de live logs met:"
-    info "  sudo podman logs -f ${CONTAINER}"
+    echo "  Volgende stap:"
+    echo "    1. Start de Dell E7440 op via PXE (F12 → Onboard NIC)."
+    echo "    2. Bekijk live logs met:"
+    echo "         sudo podman logs -f ${CONTAINER}"
+    echo "============================================================"
+    exit 0
 else
-    fail "TFTP werkt nog niet lokaal. Bekijk de containerlogs voor details:"
+    fail "TFTP werkt nog niet lokaal. Containerlogs:"
     echo
-    podman logs --tail 30 "$CONTAINER" 2>&1 || true
+    podman logs --tail 40 "$CONTAINER" 2>&1 || true
     exit 1
 fi
