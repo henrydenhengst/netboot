@@ -1,0 +1,7 @@
+# Wekelijks: documentatie + containers
+0 3 * * 0 /usr/sbin/server-toolkit.sh documentatie >> /var/log/server-toolkit.log 2>&1
+30 3 * * 0 /usr/sbin/server-toolkit.sh containers >> /var/log/server-toolkit.log 2>&1
+
+# Maandelijks: ReaR back-up + opruimen (eerste zondag)
+0 4 1-7 * 0 /usr/sbin/server-toolkit.sh backup >> /var/log/server-toolkit.log 2>&1
+30 5 1-7 * 0 /usr/sbin/server-toolkit.sh opruimen >> /var/log/server-toolkit.log 2>&1
