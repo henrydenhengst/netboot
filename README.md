@@ -35,6 +35,33 @@ Een robuuste, self-hosted infrastructuurstack ontworpen op basis van de **KISS-f
 ---
 
 ---
+
+# 🖥️ KVM/QEMU Hypervisor Setup — Functioneel Overzicht
+
+Dit script installeert en configureert een volledige **KVM/QEMU hypervisor-omgeving** met **libvirt** op **openSUSE Leap 16**.
+
+---
+
+## Functionaliteiten
+
+### 1. Omgevingscheck
+- Verifieert **rootrechten**.
+- Controleert of het besturingssysteem **openSUSE Leap 16** is.
+- Controleert de aanwezigheid van **CPU/BIOS KVM-virtualisatiehardware** (`/dev/kvm`).
+
+### 2. Installatie
+- Installeert benodigde **QEMU- en libvirt-pakketten** via `zypper`.
+
+### 3. Systeemintegratie
+- Activeert de **modulaire libvirt-daemon sockets** (`virtqemud` en `virtnetworkd`) via **systemd**.
+
+### 4. Netwerkbeheer
+- Definieert en activeert automatisch het standaard virtuele **NAT-netwerk** (`default`) voor gastsystemen — **zonder** het fysieke host-netwerk aan te passen.
+
+### 5. Statusweergave
+- Toont na voltooiing een overzicht van **actieve virtuele machines** en **virtuele netwerken**.
+
+---
 # 📋 Server Toolkit — Functioneel Overzicht
 
 Het script ondersteunt **zes modi**: `check`, `documentatie`, `backup`, `containers`, `opruimen`, of **alles** als standaard.
