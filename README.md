@@ -69,7 +69,12 @@ Dit script installeert en configureert een volledige **KVM/QEMU hypervisor-omgev
 - Installatie: Vernieuwt de pakketbronnen en installeert Tailscale non-interactief via zypper.
 - Systeemintegratie: Activeert en start de achtergrondservice (tailscaled) via systemd.
 - Validatie & Instructie: Controleert of de service actief is en toont het commando om de machine aan het Tailscale-netwerk te koppelen.
+---
+# Geavanceerde logvastlegging en rotatie voor de server-toolkit systemd-service op SUSE Leap.
 
+## Functionaliteiten:
+- Systemd Logging Fix: Past de systemd-service aan door StandardOutput en StandardError toe te voegen (via append) naar `/var/log/server-toolkit.log`. Het script maakt het logbestand aan, verifieert de systemd-syntaxis via systemd-analyze, laadt de daemon opnieuw en voert een testrun uit.
+- Logrotate Configuratie: Configureert automatische logrotatie via logrotate voor `/var/log/server-toolkit.log` met een drempelwaarde van 50MB, behoud van 8 gecomprimeerde versies, en de systemd-compatibele copytruncate-methode om onderbrekingen te voorkomen. De configuratie wordt gecontroleerd met een dry-run en kan direct geforceerd getest worden.
 
 ---
 # 📋 Server Toolkit — Functioneel Overzicht
