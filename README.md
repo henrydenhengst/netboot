@@ -34,4 +34,55 @@ Een robuuste, self-hosted infrastructuurstack ontworpen op basis van de **KISS-f
 
 ---
 
+---
+# 📋 Server Toolkit — Functioneel Overzicht
+
+Het script ondersteunt **zes modi**: `check`, `documentatie`, `backup`, `containers`, `opruimen`, of **alles** als standaard.
+
+---
+
+## 1. Systeem- en Toolcontrole (`check`)
+
+- **Dependency-check**: controleert of onmisbare tools aanwezig zijn (`supportconfig`, `rear`, `podman`, `rsync`).
+- **Bestandssysteem-inspectie**: detecteert automatisch of het root-bestandssysteem op **Btrfs** draait. Zo ja, dan wordt gecontroleerd of **Snapper** geïnstalleerd is voor snapshot-beheer.
+
+## 2. Systeemdocumentatie (`documentatie`)
+
+Maakt een timestamped map aan onder `/var/backups/server-toolkit/documentatie-<DATUM>` en legt de volledige staat van de server vast:
+
+- Draait SUSE's officiële **supportconfig**-tool voor diepgaande diagnostische logs.
+- Legt **hardware-, kernel- en geheugenstatistieken** vast (`hostnamectl`, `lscpu`, `free`, `lsblk`, `findmnt`).
+- Slaat **netwerkconfiguraties** op (IP, routes, DNS) en actieve/ingeschakelde **systemd-services**.
+- Maakt een volledige lijst van alle **geïnstalleerde pakketten** via `zypper se -i`.
+- Maakt een veilige kopie van configuratiebestanden uit `/etc` (`.conf`, `.cfg`, `.service`, `.yml`, `.yaml`).
+
+## 3. Systeemback-up (`backup`)
+
+- **Btrfs Snappers**: maakt automatisch een Snapper-snapshot aan van het root-bestandssysteem (`snapper create`) als Btrfs wordt gebruikt.
+- **Disaster Recovery (ReaR)**: triggert Relax-and-Recover (`rear mkbackup`) als het configuratiebestand `/etc/rear/local.conf` aanwezig is, om een bare-metal herstel-image te genereren.
+
+## 4. Podman Container Back-up (`containers`)
+
+Exporteert de complete staat van de containeromgeving naar `/var/backups/server-toolkit/containers-<DATUM>`:
+
+- **Inventaris**: slaat lijsten op van draaiende containers, images en volumes.
+- **Volume Export**: exporteert elk Podman-volume (`podman volume export`) en comprimeert dit direct via Gzip (`.tar.gz`).
+- **Image Saven**: slaat alle lokale container-images op als `.tar`-archieven (`podman save`).
+- **Configuratie**: slaat de volledige JSON-inspectiedata van actieve containers op en zoekt naar eventuele `docker-compose.yml` of `compose.yml`-bestanden in de werkmap.
+
+## 5. Automatisch Opruimen / Retentie (`opruimen`)
+
+- **Veiligheidsmechanisme**: voordat oude back-ups worden gewist, controleert het script of er een **recente back-up** bestaat en of de nieuwste back-up **niet ouder is dan 2 dagen**. Dit voorkomt dat het script per ongeluk álle back-ups wist als er iets misgaat.
+- **Retentie**: verwijdert back-upmappen die ouder zijn dan de ingestelde retentieperiode van **30 dagen** (`BEWAAR_DAGEN=30`).
+
+---
+
+## 🛡️ Veiligheid en Robuustheid
+
+Het script is geschreven volgens strikte shell-scriptingstandaarden:
+
+| Mechanisme | Werking |
+|---|---|
+| `set -uo pipefail` | Stopt direct bij niet-gedefinieerde variabelen of fouten in pipes |
+| Root-controle | Dwingt af dat het script met rootrechten (`sudo`) wordt uitgevoerd, voor toegang tot alle logbestanden en volumes |
 
