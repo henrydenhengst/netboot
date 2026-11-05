@@ -89,7 +89,8 @@ Dit script installeert en configureert een volledige **KVM/QEMU hypervisor-omgev
 - Systemd-integratie: Genereert een oneshot systemd-service (`security-patch.service`) en een systemd-timer (`security-patch.timer`), laadt de configuratie in, activeert de timer, en toont de planning en handige beheercommando's.
 
 ---
-# 📋 Server Toolkit — Functioneel Overzicht
+# 📋 Server Toolkit
+> Functioneel Overzicht
 
 Het script ondersteunt **zes modi**: `check`, `documentatie`, `backup`, `containers`, `opruimen`, of **alles** als standaard.
 
@@ -131,9 +132,8 @@ Exporteert de complete staat van de containeromgeving naar `/var/backups/server-
 
 ---
 
-## 🛡️ Veiligheid en Robuustheid
-
-Het script is geschreven volgens strikte shell-scriptingstandaarden:
+# 🛡️ Veiligheid en Robuustheid
+> Het script is geschreven volgens strikte shell-scriptingstandaarden:
 
 | Mechanisme | Werking |
 |---|---|
