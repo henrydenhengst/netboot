@@ -1,17 +1,30 @@
-# Netboot.xyz op openSUSE Tumbleweed
+# Netboot.xyz op openSUSE Leap 16
 ## Volledig technisch ontwerp
 
-| Category | Badge |
-|----------|-------|
-| **Playbook** | ![Version](https://img.shields.io/badge/version-7.0-blue) ![Status](https://img.shields.io/badge/status-production--ready-brightgreen) |
-| **Distributie** | ![openSUSE](https://img.shields.io/badge/openSUSE-Tumbleweed-178e3b?logo=opensuse) |
-| **Architectuur** | ![DHCP](https://img.shields.io/badge/DHCP-FULL%20mode-blue) ![TFTP](https://img.shields.io/badge/TFTP-enabled-purple) ![PXE](https://img.shields.io/badge/PXE-iPXE%2FEFI-orange) |
-| **Container** | ![Podman](https://img.shields.io/badge/container-Podman-8821e0?logo=podman) ![Netboot.xyz](https://img.shields.io/badge/netboot.xyz-latest-178e3b) |
-| **Networking** | ![Firewall](https://img.shields.io/badge/firewall-firewalld-0078d7) ![NAT](https://img.shields.io/badge/NAT-masquerade-green) |
-| **Interface** | ![Pinning](https://img.shields.io/badge/interface-udev%20pinning-important) ![Persistent](https://img.shields.io/badge/persistent-pxe0-green) |
-| **Boot Flow** | ![Entry Point](https://img.shields.io/badge/entry-ipxe.efi-blue) ![Chain](https://img.shields.io/badge/chain-HTTP-brightgreen) |
-| **Ports** | ![DHCP](https://img.shields.io/badge/67-UDP-blue) ![TFTP](https://img.shields.io/badge/69-UDP-purple) ![HTTP](https://img.shields.io/badge/80-TCP-orange) |
-| **Build** | ![Ansible](https://img.shields.io/badge/Ansible-2.20.5-ee0000?logo=ansible) ![OpenSUSE](https://img.shields.io/badge/openSUSE-Tumbleweed-green) |
+# 🚀 FreeBoot Core Infrastructure
+
+<p align="center">
+  <img src="https://via.placeholder.com/900x200/1e293b/38bdf8?text=openSUSE+Leap+%7C+Ansible+%7C+Podman+%7C+netboot.xyz" alt="FreeBoot Banner">
+</p>
+
+Een robuuste, self-hosted infrastructuurstack ontworpen op basis van de **KISS-filosofie** (Keep It Simple, Stupid). Geen zware enterprise bloat, maar snelle, voorspelbare open-source componenten voor automatisering, containerbeheer en documentatie.
+
+---
+
+## 🛠️ Stack Overzicht
+
+| Component | Rol in de Architectuur |
+| :--- | :--- |
+| **openSUSE Leap** | Rotsvaste Enterprise Linux-hostbasis |
+| **Ansible** | Volledige configuratieautomatisering en deployment |
+| **Podman** | Rootless container-runtime voor services (geen Docker daemon) |
+| **Forgejo** | Lokale, snelle Git-forge voor code- en playbookbeheer |
+| **DokuWiki** | Snelle flat-file wiki voor operationele documentatie |
+| **KVM / QEMU** | Hypervisor-laag voor virtuele machines en testnodes |
+| **netboot.xyz** | Lokale iPXE-bootomgeving voor bare-metal provisioning |
+
+---
+
 
 ---
 
