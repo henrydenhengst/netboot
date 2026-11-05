@@ -33,6 +33,17 @@ Een robuuste, self-hosted infrastructuurstack ontworpen op basis van de **KISS-f
 | **netboot.xyz** | ![netboot](https://img.shields.io/badge/-netboot.xyz-1f2937?style=flat-square&logo=ipxe&logoColor=white) | Lokale iPXE-bootomgeving voor bare-metal provisioning |
 
 ---
+# Productieklare netboot-stack 
+> op openSUSE Leap 16 voor bare-metal provisioning.
+
+## Functionaliteiten:
+- Systeemverificatie: Valideert rootrechten, openSUSE Leap distributie, systemd en zypper, en controleert vooraf de integriteit van container-image tags met skopeo.
+- Netwerkdetectie & Validatie: Laat de beheerder een netwerkinterface kiezen, haalt het IP-adres en de CIDR-prefix op, en berekent automatisch de netwerk- en netmaskerparameters.
+- Geavanceerde Prerequisite Checks & Workarounds: Installeert benodigde tools (python3, skopeo) en implementeert de kritische 0xFF-workaround voor UEFI-bootproblemen op specifieke hardware (zoals de Dell E7440).
+- Beheerde Services & Firewall: Installeert en configureert dnsmasq als proxy-DHCP server, Cockpit (op poort 9090) en past firewall-regels dynamisch toe op de actieve firewalld-zone.
+- Container Orchestration via Podman Quadlets: Zet systemd Quadlet-units op voor drie services: netboot.xyz (TFTP, HTTP op poort 80 en Web UI op 12080, met aangepaste DNS_SERVER=1.1.1.1), DokuWiki (poort 12081) en Forgejo (HTTP op poort 12082 en SSH op 2222).
+- Robuuste Foutafhandeling & Rollback: Bevat uitgebreide foutdetectie met automatische statusregistratie en getypeerde rollbacks voor bestanden, services, mappen en containers.
+- Uitgebreide Validatie & Rapportage: Voert een strenge eindcontrole uit op alle actieve services, container-statussen, poorten, TFTP-bereikbaarheid en HTTP-responsen, en toont een overzichtelijke samenvatting met volgende stappen.
 
 ---
 
