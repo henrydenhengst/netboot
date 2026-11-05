@@ -86,3 +86,14 @@ Het script is geschreven volgens strikte shell-scriptingstandaarden:
 | `set -uo pipefail` | Stopt direct bij niet-gedefinieerde variabelen of fouten in pipes |
 | Root-controle | Dwingt af dat het script met rootrechten (`sudo`) wordt uitgevoerd, voor toegang tot alle logbestanden en volumes |
 
+
+```bash
+# Wekelijks: documentatie + containers
+0 3 * * 0 /usr/sbin/server-toolkit.sh documentatie >> /var/log/server-toolkit.log 2>&1
+30 3 * * 0 /usr/sbin/server-toolkit.sh containers >> /var/log/server-toolkit.log 2>&1
+
+# Maandelijks: ReaR back-up + opruimen (eerste zondag)
+0 4 1-7 * 0 /usr/sbin/server-toolkit.sh backup >> /var/log/server-toolkit.log 2>&1
+30 5 1-7 * 0 /usr/sbin/server-toolkit.sh opruimen >> /var/log/server-toolkit.log 2>&1
+```
+
