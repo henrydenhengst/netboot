@@ -60,6 +60,16 @@ Dit script installeert en configureert een volledige **KVM/QEMU hypervisor-omgev
 
 ### 5. Statusweergave
 - Toont na voltooiing een overzicht van **actieve virtuele machines** en **virtuele netwerken**.
+---
+
+# Tailscale op openSUSE Leap 16 voor veilige mesh-VPN-connectiviteit.
+
+## Functionaliteiten:
+- Repository toevoegen: Voegt de officiële Tailscale package repository toe voor openSUSE Leap 16.0.
+- Installatie: Vernieuwt de pakketbronnen en installeert Tailscale non-interactief via zypper.
+- Systeemintegratie: Activeert en start de achtergrondservice (tailscaled) via systemd.
+- Validatie & Instructie: Controleert of de service actief is en toont het commando om de machine aan het Tailscale-netwerk te koppelen.
+
 
 ---
 # 📋 Server Toolkit — Functioneel Overzicht
