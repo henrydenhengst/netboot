@@ -36,7 +36,8 @@ Een robuuste, self-hosted infrastructuurstack ontworpen op basis van de **KISS-f
 
 ---
 
-# 🖥️ KVM/QEMU Hypervisor Setup — Functioneel Overzicht
+# 🖥️ KVM/QEMU Hypervisor Setup
+> Functioneel Overzicht
 
 Dit script installeert en configureert een volledige **KVM/QEMU hypervisor-omgeving** met **libvirt** op **openSUSE Leap 16**.
 
@@ -62,7 +63,8 @@ Dit script installeert en configureert een volledige **KVM/QEMU hypervisor-omgev
 - Toont na voltooiing een overzicht van **actieve virtuele machines** en **virtuele netwerken**.
 ---
 
-# Tailscale op openSUSE Leap 16 voor veilige mesh-VPN-connectiviteit.
+# Tailscale op openSUSE Leap 16 
+> Voor veilige mesh-VPN-connectiviteit.
 
 ## Functionaliteiten:
 - Repository toevoegen: Voegt de officiële Tailscale package repository toe voor openSUSE Leap 16.0.
@@ -70,11 +72,21 @@ Dit script installeert en configureert een volledige **KVM/QEMU hypervisor-omgev
 - Systeemintegratie: Activeert en start de achtergrondservice (tailscaled) via systemd.
 - Validatie & Instructie: Controleert of de service actief is en toont het commando om de machine aan het Tailscale-netwerk te koppelen.
 ---
-# Geavanceerde logvastlegging en rotatie voor de server-toolkit systemd-service op SUSE Leap.
+# Geavanceerde logvastlegging en rotatie
+> Voor de server-toolkit systemd-service op SUSE Leap.
 
 ## Functionaliteiten:
 - Systemd Logging Fix: Past de systemd-service aan door StandardOutput en StandardError toe te voegen (via append) naar `/var/log/server-toolkit.log`. Het script maakt het logbestand aan, verifieert de systemd-syntaxis via systemd-analyze, laadt de daemon opnieuw en voert een testrun uit.
 - Logrotate Configuratie: Configureert automatische logrotatie via logrotate voor `/var/log/server-toolkit.log` met een drempelwaarde van 50MB, behoud van 8 gecomprimeerde versies, en de systemd-compatibele copytruncate-methode om onderbrekingen te voorkomen. De configuratie wordt gecontroleerd met een dry-run en kan direct geforceerd getest worden.
+---
+# Beveiligingsupdates op openSUSE Leap 16 
+> via een systemd-timer die wekelijks op vrijdag om 03:00 uur draait.
+
+## Functionaliteiten:
+- Systeemverificatie: Controleert of het script met rootrechten wordt uitgevoerd en of de pakketbeheerder (zypper) aanwezig is. Opruiming van eventuele verouderde timers/services uit eerdere versies.
+- Patch-runner script: Maakt het script `/usr/local/sbin/security-patch.sh` aan dat de pakketbronnen ververst en maximaal drie pogingen onderneemt om alleen security-patches toe te passen (`zypper patch --category security`), waarbij automatisch pakketbeheer-updates (exitcode 103) worden opgevangen.
+- Automatische herstart: Controleert of een herstart vereist is (via exitcode 102 of `zypper needs-rebooting`) en plant indien nodig direct een systeemrestart in over 1 minuut.
+- Systemd-integratie: Genereert een oneshot systemd-service (`security-patch.service`) en een systemd-timer (`security-patch.timer`), laadt de configuratie in, activeert de timer, en toont de planning en handige beheercommando's.
 
 ---
 # 📋 Server Toolkit — Functioneel Overzicht
