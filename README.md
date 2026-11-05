@@ -34,24 +34,4 @@ Een robuuste, self-hosted infrastructuurstack ontworpen op basis van de **KISS-f
 
 ---
 
-## 📂 Project Structuur
 
-```text
-freeboot-infra-core/
-├── .github/
-│   └── workflows/              # CI/CD linting voor Ansible playbooks
-├── ansible/
-│   ├── inventory.yml           # Host definities (192.168.192.0/18 subnet)
-│   ├── site.yml                # Hoofdplaybook
-│   └── roles/
-│       ├── host_base/          # openSUSE Leap, KVM, br0 bridge, packages
-│       ├── podman_services/    # Podman systemd units voor Forgejo & DokuWiki
-│       └── netboot_pxe/        # Lokale iPXE / netboot.xyz menu configuratie
-├── containers/
-│   ├── docker-compose.yml      # Podman-compatible compose voor Forgejo & DokuWiki
-│   ├── forgejo/
-│   │   └── app.ini.template    # Configuratie template
-│   └── dokuwiki/
-│       └── local.php           # Flat-file instellingen
-└── tftp/
-    └── custom.ipxe             # Lokale netboot.xyz custom menu override
